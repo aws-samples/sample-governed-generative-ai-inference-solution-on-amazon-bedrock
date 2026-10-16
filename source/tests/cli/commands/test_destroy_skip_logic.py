@@ -145,6 +145,21 @@ class TestSkipGuards:
         for stack in ("networking", "monitoring", "analytics", "s3bucket"):
             assert stack not in deleted, f"{stack} should be skipped in sidecar mode"
 
+    def test_sidecar_quota_deletes_s3bucket(self):
+        """Sidecar + quota deploys s3bucket for Lambda artifacts (deploy.py); destroy must remove it."""
+        _, deleted = _run_destroy(
+            _profile(monitoring_enabled=True, monitoring_mode="sidecar", quota_monitoring_enabled=True)
+        )
+        assert "s3bucket" in deleted
+        assert "quota" in deleted
+        for stack in ("networking", "monitoring", "analytics"):
+            assert stack not in deleted
+
+    def test_model_lifecycle_alone_deletes_s3bucket(self):
+        """Model lifecycle alerts deploy s3bucket even without monitoring."""
+        _, deleted = _run_destroy(_profile(monitoring_enabled=False, model_lifecycle_enabled=True))
+        assert "s3bucket" in deleted
+
     def test_quota_deleted_only_when_enabled(self):
         _, with_it = _run_destroy(_profile(quota_monitoring_enabled=True))
         assert "quota" in with_it

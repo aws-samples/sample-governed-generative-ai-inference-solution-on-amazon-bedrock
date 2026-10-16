@@ -115,6 +115,19 @@ def _artifact_regions(profile) -> list[str]:
     return list(dict.fromkeys(regions))
 
 
+def _s3bucket_deployed(profile) -> bool:
+    """True when `gip deploy` schedules the s3bucket stack for this profile (see deploy.py)."""
+    monitoring = getattr(profile, "monitoring_enabled", False) is True
+    central = monitoring and getattr(profile, "monitoring_mode", "central") == "central"
+    quota = monitoring and getattr(profile, "quota_monitoring_enabled", False) is True
+    return (
+        central
+        or quota
+        or getattr(profile, "metering_enabled", False) is True
+        or getattr(profile, "model_lifecycle_enabled", False) is True
+    )
+
+
 class DestroyCommand(Command):
     name = "destroy"
     description = "Remove deployed AWS infrastructure"
@@ -216,15 +229,14 @@ class DestroyCommand(Command):
                 continue
             if stack == "analytics" and not profile.monitoring_enabled:
                 continue
-            if (
-                stack == "s3bucket"
-                and not profile.monitoring_enabled
-                and not getattr(profile, "metering_enabled", False)
-            ):
-                continue
             # Skip ECS-related stacks in sidecar mode
             monitoring_mode = getattr(profile, "monitoring_mode", "central")
-            if monitoring_mode == "sidecar" and stack in ("networking", "monitoring", "analytics", "s3bucket"):
+            if monitoring_mode == "sidecar" and stack in ("networking", "monitoring", "analytics"):
+                continue
+            # s3bucket (Lambda artifacts) is deployed for central monitoring, for quota in either
+            # monitoring mode, and for model lifecycle alerts; mirror deploy so sidecar+quota
+            # profiles don't leave it behind.
+            if stack == "s3bucket" and not _s3bucket_deployed(profile):
                 continue
             if stack == "quota" and not getattr(profile, "quota_monitoring_enabled", False):
                 continue

@@ -109,6 +109,16 @@ def _remember_prior_codebuild_region(config: dict, prior_region: str) -> None:
         priors.append(prior_region)
 
 
+DISTRIBUTION_DISABLED = "disabled"
+
+
+def normalize_distribution_type(value):
+    """Map the wizard's Disabled choice (and the legacy "Disabled" string) to None."""
+    if value is None or str(value).lower() == DISTRIBUTION_DISABLED:
+        return None
+    return value
+
+
 class InitCommand(Command):
     name = "init"
     description = "Interactive setup wizard for first-time deployment"
@@ -1930,18 +1940,22 @@ class InitCommand(Command):
         distribution_choices = [
             questionary.Choice("Presigned S3 URLs (simple, no authentication)", value="presigned-s3"),
             questionary.Choice("Authenticated Landing Page (IdP + ALB)", value="landing-page"),
-            questionary.Choice("Disabled", value=None),
+            # questionary replaces a None value with the title, so "Disabled" needs a real sentinel;
+            # value=None made this choice return "Disabled", which enabled presigned-S3 distribution.
+            questionary.Choice("Disabled", value=DISTRIBUTION_DISABLED),
         ]
 
-        # Get saved value or default to None
-        saved_dist_type = config.get("distribution", {}).get("type")
-        default_choice = saved_dist_type if saved_dist_type else None
+        # Saved value, else Disabled (default=None would put the cursor on the first choice).
+        saved_dist_type = normalize_distribution_type(config.get("distribution", {}).get("type"))
+        default_choice = saved_dist_type or DISTRIBUTION_DISABLED
 
-        distribution_type = questionary.select(
-            "Distribution method:",
-            choices=distribution_choices,
-            default=default_choice,
-        ).ask()
+        distribution_type = normalize_distribution_type(
+            questionary.select(
+                "Distribution method:",
+                choices=distribution_choices,
+                default=default_choice,
+            ).ask()
+        )
 
         # Preserve existing distribution settings, only update enabled/type
         if "distribution" not in config:

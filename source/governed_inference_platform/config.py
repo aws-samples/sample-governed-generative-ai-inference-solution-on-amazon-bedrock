@@ -417,6 +417,12 @@ class Profile:
                 except Exception:
                     pass  # Leave provider_type unset if parsing fails
 
+        # Profiles written while the wizard's "Disabled" choice returned the string "Disabled"
+        # stored distribution as enabled; treat them as disabled.
+        if str(data.get("distribution_type") or "").lower() == "disabled":
+            data["distribution_type"] = None
+            data["enable_distribution"] = False
+
         # Migrate legacy distribution configuration
         if "enable_distribution" in data and data.get("enable_distribution"):
             # If distribution was enabled but no type specified, default to presigned-s3
