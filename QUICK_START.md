@@ -96,8 +96,8 @@ This automatically routes requests across multiple AWS regions to ensure the bes
 
 ```bash
 # Clone the repository
-git clone https://github.com/aws-samples/sample-guidance-for-governed-inference-platform-on-amazon-bedrock
-cd sample-guidance-for-governed-inference-platform-on-amazon-bedrock/source
+git clone https://github.com/aws-samples/sample-governed-generative-ai-inference-solution-on-amazon-bedrock
+cd sample-governed-generative-ai-inference-solution-on-amazon-bedrock/source
 
 # Install dependencies
 poetry install

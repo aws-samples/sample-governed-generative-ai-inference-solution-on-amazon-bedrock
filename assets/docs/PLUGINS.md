@@ -12,7 +12,7 @@ Developers install plugins directly from this repository's marketplace using the
 
 ```bash
 # Add this repo as a marketplace source
-/plugin marketplace add aws-samples/sample-guidance-for-governed-inference-platform-on-amazon-bedrock
+/plugin marketplace add aws-samples/sample-governed-generative-ai-inference-solution-on-amazon-bedrock
 
 # Install a specific plugin
 /plugin install security@aws-claude-code-plugins

@@ -23,7 +23,7 @@ The CloudFormation template creates a Cognito User Pool with:
 ```bash
 # Clone the repository
 git clone <repository-url>
-cd sample-guidance-for-governed-inference-platform-on-amazon-bedrock
+cd sample-governed-generative-ai-inference-solution-on-amazon-bedrock
 
 # Deploy the User Pool stack
 aws cloudformation deploy \

@@ -5,7 +5,7 @@ This directory contains the `marketplace.json` file that registers available plu
 ## Usage
 
 ```bash
-/plugin marketplace add aws-samples/sample-guidance-for-governed-inference-platform-on-amazon-bedrock
+/plugin marketplace add aws-samples/sample-governed-generative-ai-inference-solution-on-amazon-bedrock
 ```
 
 ## What this is

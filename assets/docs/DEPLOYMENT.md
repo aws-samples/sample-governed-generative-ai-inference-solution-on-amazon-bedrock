@@ -81,8 +81,8 @@ Before moving on, note two critical values from your application configuration: 
 With your identity provider configured, it's time to deploy the AWS infrastructure that bridges your organization's authentication to Amazon Bedrock. Start by cloning the repository and installing the deployment tools:
 
 ```bash
-git clone https://github.com/aws-samples/sample-guidance-for-governed-inference-platform-on-amazon-bedrock
-cd sample-guidance-for-governed-inference-platform-on-amazon-bedrock/source
+git clone https://github.com/aws-samples/sample-governed-generative-ai-inference-solution-on-amazon-bedrock
+cd sample-governed-generative-ai-inference-solution-on-amazon-bedrock/source
 poetry install
 ```
 

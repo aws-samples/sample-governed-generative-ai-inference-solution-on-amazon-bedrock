@@ -1,8 +1,8 @@
 site_name: Governed AI Inference Platform on Amazon Bedrock
 site_description: Enterprise guidance for a governed Bedrock inference endpoint — SSO, budgets, attribution, and model governance for Claude Code, Claude Desktop (Cowork), and any AWS-SDK harness
-site_url: https://aws-samples.github.io/sample-guidance-for-governed-inference-platform-on-amazon-bedrock/
-repo_url: https://github.com/aws-samples/sample-guidance-for-governed-inference-platform-on-amazon-bedrock
-repo_name: aws-samples/sample-guidance-for-governed-inference-platform-on-amazon-bedrock
+site_url: https://aws-samples.github.io/sample-governed-generative-ai-inference-solution-on-amazon-bedrock/
+repo_url: https://github.com/aws-samples/sample-governed-generative-ai-inference-solution-on-amazon-bedrock
+repo_name: aws-samples/sample-governed-generative-ai-inference-solution-on-amazon-bedrock
 edit_uri: edit/main/
 
 theme:

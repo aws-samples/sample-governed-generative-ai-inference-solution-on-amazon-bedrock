@@ -58,8 +58,8 @@ The Governed Inference Platform CLI (`gip`) provides commands for IT administrat
 
 ```bash
 # Clone the repository
-git clone [<repository-url>](https://github.com/aws-samples/sample-guidance-for-governed-inference-platform-on-amazon-bedrock.git)
-cd sample-guidance-for-governed-inference-platform-on-amazon-bedrock/source
+git clone [<repository-url>](https://github.com/aws-samples/sample-governed-generative-ai-inference-solution-on-amazon-bedrock.git)
+cd sample-governed-generative-ai-inference-solution-on-amazon-bedrock/source
 
 # Install dependencies
 poetry install
