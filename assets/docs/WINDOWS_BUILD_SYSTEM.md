@@ -215,7 +215,7 @@ sequenceDiagram
 
 ```bash
 git clone <repository-url>
-cd sample-guidance-for-governed-inference-platform-on-amazon-bedrock/source
+cd sample-governed-generative-ai-inference-solution-on-amazon-bedrock/source
 ```
 
 ### 2. Install Dependencies

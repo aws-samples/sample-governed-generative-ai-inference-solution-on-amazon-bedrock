@@ -46,5 +46,5 @@ Click the link, add any extra context, submit. That's it.
 
 - [Operational Runbooks](RUNBOOKS.md) — procedures for outages, rotations, quota failures, and upgrades
 - [CLI Reference](CLI_REFERENCE.md) — full command documentation
-- [GitHub Issues](https://github.com/aws-samples/sample-guidance-for-governed-inference-platform-on-amazon-bedrock/issues) — search existing issues
+- [GitHub Issues](https://github.com/aws-samples/sample-governed-generative-ai-inference-solution-on-amazon-bedrock/issues) — search existing issues
 - [Monitoring Guide](MONITORING.md) — telemetry setup and dashboards

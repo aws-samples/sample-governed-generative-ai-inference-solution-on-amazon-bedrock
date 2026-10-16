@@ -27,7 +27,7 @@ from governed_inference_platform.cli.utils.proc import run_checked
 # GitHub repo for this project (issue reports, release downloads).
 # Overridable for forks or pre-rename release archives.
 RELEASE_REPO = os.environ.get(
-    "GIP_RELEASE_REPO", "aws-samples/sample-guidance-for-governed-inference-platform-on-amazon-bedrock"
+    "GIP_RELEASE_REPO", "aws-samples/sample-governed-generative-ai-inference-solution-on-amazon-bedrock"
 )
 
 

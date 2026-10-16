@@ -1,6 +1,6 @@
 This sample is provided for illustration purposes. It represents a baseline implementation and may not address all security considerations for your specific environment. Review and adapt it before production use.
 
-# Governed Inference Platform on Amazon Bedrock
+# Governed generative AI inference solution on Amazon Bedrock
 
 A governed, modular pre-build that you deploy to get a **serverless LLM inference platform** on Amazon Bedrock and native AWS services. Deploy the platform once; it powers three kinds of consumers: **internal products** where LLMs are embedded (any app using the AWS SDK), **SuperApps** such as Claude Cowork and Claude Desktop (a pattern that extends to other enterprise AI apps), and the **CLI coding harnesses** your developers choose — Claude Code, Codex CLI, OpenCode, Aider, Pi.
 

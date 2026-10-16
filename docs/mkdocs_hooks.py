@@ -7,18 +7,18 @@ def on_page_markdown(markdown, page, **kwargs):
             markdown = markdown.replace(
                 "](assets/claude-code-plugins/)",
                 "](https://github.com/aws-samples/"
-                "sample-guidance-for-governed-inference-platform-on-amazon-bedrock/tree/main/"
+                "sample-governed-generative-ai-inference-solution-on-amazon-bedrock/tree/main/"
                 "assets/claude-code-plugins/)",
             )
             markdown = markdown.replace(
                 "](CONTRIBUTING.md#",
-                "](https://github.com/aws-samples/sample-guidance-for-governed-inference-platform-on-amazon-bedrock/blob/main/CONTRIBUTING.md#",
+                "](https://github.com/aws-samples/sample-governed-generative-ai-inference-solution-on-amazon-bedrock/blob/main/CONTRIBUTING.md#",
             )
             for root_file in ("LICENSE", "THIRD-PARTY-LICENSES"):
                 markdown = markdown.replace(
                     f"]({root_file})",
                     "](https://github.com/aws-samples/"
-                    f"sample-guidance-for-governed-inference-platform-on-amazon-bedrock/blob/main/{root_file})",
+                    f"sample-governed-generative-ai-inference-solution-on-amazon-bedrock/blob/main/{root_file})",
                 )
         return markdown
 

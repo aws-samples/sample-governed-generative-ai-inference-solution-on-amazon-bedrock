@@ -287,8 +287,8 @@ Once you've completed this Auth0 setup:
 
 1. Clone the repository:
    ```bash
-   git clone https://github.com/aws-samples/sample-guidance-for-governed-inference-platform-on-amazon-bedrock.git
-   cd sample-guidance-for-governed-inference-platform-on-amazon-bedrock
+   git clone https://github.com/aws-samples/sample-governed-generative-ai-inference-solution-on-amazon-bedrock.git
+   cd sample-governed-generative-ai-inference-solution-on-amazon-bedrock
    poetry install
    ```
 2. Run the setup wizard: `poetry run gip init`
