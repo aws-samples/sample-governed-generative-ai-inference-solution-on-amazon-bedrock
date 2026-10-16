@@ -119,6 +119,22 @@ def normalize_distribution_type(value):
     return value
 
 
+def distribution_prompt_options(config: dict):
+    """Choices and default for the Distribution method prompt.
+
+    questionary replaces a Choice value of None with its title, so "Disabled" needs a real sentinel
+    (value=None returned "Disabled", which enabled presigned-S3 distribution). The default is the saved
+    type, else Disabled: default=None puts the cursor on the first choice.
+    """
+    choices = [
+        questionary.Choice("Presigned S3 URLs (simple, no authentication)", value="presigned-s3"),
+        questionary.Choice("Authenticated Landing Page (IdP + ALB)", value="landing-page"),
+        questionary.Choice("Disabled", value=DISTRIBUTION_DISABLED),
+    ]
+    saved = normalize_distribution_type(config.get("distribution", {}).get("type"))
+    return choices, saved or DISTRIBUTION_DISABLED
+
+
 class InitCommand(Command):
     name = "init"
     description = "Interactive setup wizard for first-time deployment"
@@ -1937,17 +1953,7 @@ class InitCommand(Command):
         console.print("  • Presigned S3 URLs: Simple, no authentication (good for < 20 users)")
         console.print("  • Landing Page: IdP authentication with web UI (good for 20-100 users)")
 
-        distribution_choices = [
-            questionary.Choice("Presigned S3 URLs (simple, no authentication)", value="presigned-s3"),
-            questionary.Choice("Authenticated Landing Page (IdP + ALB)", value="landing-page"),
-            # questionary replaces a None value with the title, so "Disabled" needs a real sentinel;
-            # value=None made this choice return "Disabled", which enabled presigned-S3 distribution.
-            questionary.Choice("Disabled", value=DISTRIBUTION_DISABLED),
-        ]
-
-        # Saved value, else Disabled (default=None would put the cursor on the first choice).
-        saved_dist_type = normalize_distribution_type(config.get("distribution", {}).get("type"))
-        default_choice = saved_dist_type or DISTRIBUTION_DISABLED
+        distribution_choices, default_choice = distribution_prompt_options(config)
 
         distribution_type = normalize_distribution_type(
             questionary.select(

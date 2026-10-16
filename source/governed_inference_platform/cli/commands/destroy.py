@@ -116,15 +116,24 @@ def _artifact_regions(profile) -> list[str]:
 
 
 def _s3bucket_deployed(profile) -> bool:
-    """True when `gip deploy` schedules the s3bucket stack for this profile (see deploy.py)."""
+    """True when `gip deploy` schedules the s3bucket stack for this profile.
+
+    Mirrors deploy.py: central monitoring; quota (OIDC or IDC) in either monitoring mode; server-side
+    metering; model lifecycle alerts; the skills registry.
+    """
     monitoring = getattr(profile, "monitoring_enabled", False) is True
     central = monitoring and getattr(profile, "monitoring_mode", "central") == "central"
-    quota = monitoring and getattr(profile, "quota_monitoring_enabled", False) is True
+    quota = (
+        monitoring
+        and getattr(profile, "quota_monitoring_enabled", False) is True
+        and getattr(profile, "effective_auth_type", None) in ("oidc", "idc")
+    )
     return (
         central
         or quota
         or getattr(profile, "metering_enabled", False) is True
         or getattr(profile, "model_lifecycle_enabled", False) is True
+        or getattr(profile, "skills_registry_enabled", False) is True
     )
 
 
@@ -236,7 +245,7 @@ class DestroyCommand(Command):
             # s3bucket (Lambda artifacts) is deployed for central monitoring, for quota in either
             # monitoring mode, and for model lifecycle alerts; mirror deploy so sidecar+quota
             # profiles don't leave it behind.
-            if stack == "s3bucket" and not _s3bucket_deployed(profile):
+            if stack == "s3bucket" and not stack_arg and not _s3bucket_deployed(profile):
                 continue
             if stack == "quota" and not getattr(profile, "quota_monitoring_enabled", False):
                 continue
@@ -244,8 +253,20 @@ class DestroyCommand(Command):
                 continue
             if stack == "model-lifecycle" and not getattr(profile, "model_lifecycle_enabled", False):
                 continue
-            if stack == "distribution" and not getattr(profile, "enable_distribution", False):
+            legacy_distribution = getattr(profile, "distribution_legacy_disabled", False) is True
+            if (
+                stack == "distribution"
+                and not stack_arg
+                and not getattr(profile, "enable_distribution", False)
+                and not legacy_distribution
+            ):
                 continue
+            if stack == "distribution" and legacy_distribution:
+                console.print(
+                    "[yellow]This profile was saved with the old wizard's 'Disabled' distribution choice, which "
+                    "still deployed the presigned-S3 distribution stack (IAM user and access key). "
+                    "Deleting it.[/yellow]"
+                )
             if stack == "codebuild" and not getattr(profile, "enable_codebuild", False):
                 continue
             if stack == "websearch" and not getattr(profile, "web_search_enabled", False):
