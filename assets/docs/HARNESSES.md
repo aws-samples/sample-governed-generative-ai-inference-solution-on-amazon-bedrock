@@ -1,4 +1,4 @@
-# Any Coding Harness on Bedrock: The Universal Credential-Process Plug
+# Coding harnesses on Amazon Bedrock with the credential-process plug
 
 This guidance is packaged for Claude Code, but its authentication core is
 harness-agnostic. The credential-process binary emits standard
@@ -11,9 +11,9 @@ credential_process = /home/user/gip/credential-process --profile gip
 region = us-east-1
 ```
 
-Any coding harness that resolves credentials through the **AWS SDK default
-chain** — OpenCode, OpenAI Codex CLI, Pi, Aider, or anything else that speaks
-Bedrock — inherits the full enterprise control plane with **zero
+A coding harness that resolves credentials through the **AWS SDK default
+chain**, such as OpenCode, Pi, or Aider (OpenAI Codex CLI for MCP tools only),
+can use the sample's controls with **no
 harness-specific auth work**. Generate ready-to-use configs with:
 
 ```bash
@@ -68,12 +68,15 @@ flowchart TB
     ROUTE -->|Unsupported| NOMCP
 ```
 
-## The universal-plug guarantees
+## Controls shared by every harness on the plug
 
-These controls are enforced **below the harness layer** — in the
-credential-process binary and in IAM — so no harness can opt out of them:
+These controls are enforced **below the harness layer**, in the
+credential-process binary and in IAM, so a harness can't opt out of them through its
+own settings. The quota check runs in the standard binary, so a modified client that
+calls AWS STS directly can skip it; IAM policy still applies
+([How the controls work](HOW_IT_WORKS.md)):
 
-| Guarantee | Enforced where | Applies to |
+| Control | Enforced where | Applies to |
 |---|---|---|
 | **OIDC SSO login** (browser flow, token cache, silent refresh) | credential-process binary | Every harness identically |
 | **Quota enforcement** | credential-process checks quota **before vending credentials**; blocked users get no credentials at all | Every harness identically |
@@ -185,7 +188,7 @@ Verified against: <https://docs.cline.bot/provider-config/aws-bedrock/cli-profil
 Cline's "AWS Bedrock" provider reads a named AWS profile (or the default
 credential chain) from `~/.aws` — Cline's enterprise docs describe it as the
 "standard AWS credential provider chain". Point it at the managed profile and it
-inherits SSO, quota, attribution, and IAM guardrails with zero extra work:
+can use SSO, quota, attribution, and IAM guardrails with no extra work:
 
 1. In Cline settings, choose provider **AWS Bedrock**.
 2. Select authentication **AWS Profile** and enter `gip`.
@@ -218,27 +221,27 @@ models:
 > one-user smoke test before fleet rollout. As with Cline, no generated config
 > ships — the snippet above is the integration.
 
-### Not governable today: Cursor, Windsurf, Gemini CLI
+### Not currently covered by this sample: Cursor, Windsurf, Gemini CLI
 
-Documented so security teams can block these knowingly (all sources retrieved
+Documented so security teams can decide how to handle these (all sources retrieved
 2026-07-08):
 
-| Harness | Why it cannot be governed by this platform |
+| Harness | Why this sample doesn't cover it |
 |---|---|
-| **Cursor** | The CLI rejects Bedrock models ("Bedrock models are disabled" — [Cursor forum, 2026-02-25](https://forum.cursor.com/t/cli-support-for-aws-bedrock-integration/152865)). The IDE's BYOK-Bedrock option exists but uses static keys or an IAM role (with external ID) **assumed by Cursor's backend**, not the local credential chain ([Cursor API-keys docs](https://docs.cursor.com/advanced/api-keys)) — it would bypass credential-process entirely, so quota, session-name attribution, and the fail-closed vend gate never run. **Enabling Cursor BYOK-Bedrock against your account breaks the governance model**; block it via IdP/network policy if that matters |
+| **Cursor** | The CLI rejects Bedrock models ("Bedrock models are disabled" — [Cursor forum, 2026-02-25](https://forum.cursor.com/t/cli-support-for-aws-bedrock-integration/152865)). The IDE's BYOK-Bedrock option exists but uses static keys or an IAM role (with external ID) **assumed by Cursor's backend**, not the local credential chain ([Cursor API-keys docs](https://docs.cursor.com/advanced/api-keys)) — it would bypass credential-process entirely, so quota, session-name attribution, and the fail-closed vend gate never run. With BYOK-Bedrock, requests don't pass through this sample's controls; decide with your security team whether to allow it |
 | **Windsurf** | Inference routes through Windsurf's service; no Bedrock / bring-your-own-credential-chain option in the official docs index ([docs.windsurf.com](https://docs.windsurf.com)) |
-| **Gemini CLI** | No Bedrock support; the feature request went stale ([google-gemini/gemini-cli#3454](https://github.com/google-gemini/gemini-cli/issues/3454), opened 2025-07-07) |
+| **Gemini CLI** | No Amazon Bedrock provider as of 2026-07-08 ([google-gemini/gemini-cli#3454](https://github.com/google-gemini/gemini-cli/issues/3454), opened 2025-07-07) |
 
-For the requirements a harness must meet to inherit governance for free, the
+For the requirements a harness must meet to use this sample's controls, the
 test is simple: **does it resolve Bedrock credentials through the AWS SDK
 default chain / `~/.aws` profiles?** If yes (Cline, Continue, and the four
-harnesses above), it is governed. If it ships its own key store or routes
-inference through vendor servers, it is not.
+harnesses above), this sample covers it. If it ships its own key store or routes
+inference through vendor servers, this sample doesn't cover it.
 
 ## Honest capability matrix
 
-Authentication, quota, and IAM guardrails are universal. Everything built on
-Claude Code's own client hooks is not. (The non-Claude-Code column applies
+Authentication, quota, and IAM guardrails apply to every harness on the plug.
+Features built on Claude Code's own client hooks don't. (The non-Claude-Code column applies
 equally to Cline and Continue — they ride the same profile.)
 
 | Capability | Claude Code | OpenCode / Codex / Pi / Aider |
