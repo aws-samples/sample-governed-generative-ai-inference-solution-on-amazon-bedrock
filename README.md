@@ -2,9 +2,9 @@ This sample is provided for illustration purposes. It represents a baseline impl
 
 # Governed generative AI inference solution on Amazon Bedrock
 
-A governed, modular pre-build that you deploy to get a **serverless LLM inference platform** on Amazon Bedrock and native AWS services. Deploy the platform once; it powers three kinds of consumers: **internal products** where LLMs are embedded (any app using the AWS SDK), **SuperApps** such as Claude Cowork and Claude Desktop (a pattern that extends to other enterprise AI apps), and the **CLI coding harnesses** your developers choose — Claude Code, Codex CLI, OpenCode, Aider, Pi.
+A modular sample that deploys a shared set of identity, policy, and usage controls for supported generative AI clients that invoke models in Amazon Bedrock, using serverless and native AWS services. Supported clients fall into three groups: **internal products** where LLMs are embedded (any app using the AWS SDK), **desktop AI apps** such as Claude Cowork and Claude Desktop, and **CLI coding harnesses** such as Claude Code, OpenCode, Aider, and Pi (Codex CLI for the sample's MCP tools only).
 
-Governance controls such as SSO identity, optional per-user budgets in dollars or tokens, cost attribution, model governance, and telemetry are enforced **below the app layer** (IAM, STS, optional quota-gated credential issuance, and optional Bedrock invocation-log metering). Consumers plug in like appliances into a wall socket and inherit the controls you enable.
+Governance controls such as SSO identity, optional per-user budgets in dollars or tokens, cost attribution, model governance, and telemetry are enforced **below the app layer** (IAM, STS, optional quota-gated credential issuance, and optional Bedrock invocation-log metering). Supported clients that use a configured integration path can use the controls you enable; [Harnesses Guide](assets/docs/HARNESSES.md) lists which clients the sample covers.
 
 ## Start Here
 
@@ -23,11 +23,11 @@ Configuration flows from the administrator profile in `~/.gip/profiles/<name>.js
 | **SuperApps** | Claude Desktop (Chat, Cowork, Code); pattern extends to other enterprise AI apps | Pinned AWS Samples [Claude apps gateway](#claude-apps-gateway-recommended-for-claude-apps) (recommended) or the credential-process architecture via static MDM | [CoWork 3P Guide](assets/docs/COWORK_3P.md) |
 | **CLI coding harnesses** | Claude Code, Codex CLI, OpenCode, Aider, Pi | Gateway (Claude apps) or the `credential_process` plug — zero harness-specific auth work | [Claude Code](#claude-code-cli), [Harnesses Guide](assets/docs/HARNESSES.md) |
 
-The platform is consumer-agnostic. Deploy it once, then connect each surface your organization uses.
+The sample is consumer-agnostic: each supported surface your organization connects uses the same deployed controls.
 
 ### Internal products (any AWS SDK app)
 
-The credential-process binary is a standard AWS `credential_process` provider. Any application that resolves credentials through the AWS SDK default chain receives temporary credentials with SSO identity attached. When a quota endpoint is configured, issuance is quota-gated and per-user budgets apply. Cost attribution and IAM model/region guardrails require no app-side auth work. Server-side controls (default-on model allow-list scoping, optional account-level [Guardrails](assets/docs/GUARDRAILS.md), optional [invocation-log metering](assets/docs/QUOTA_MONITORING.md#server-side-metering-tamper-proof-usage)) sit below the client entirely and cover every consumer in the account identically.
+The credential-process binary is a standard AWS `credential_process` provider. Any application that resolves credentials through the AWS SDK default chain receives temporary credentials with SSO identity attached. When a quota endpoint is configured, issuance is quota-gated and per-user budgets apply. Cost attribution and IAM model/region guardrails require no app-side auth work. Server-side controls (default-on model allow-list scoping, optional account-level [Guardrails](assets/docs/GUARDRAILS.md), optional [invocation-log metering](assets/docs/QUOTA_MONITORING.md#server-side-metering-tamper-proof-usage)) sit below the client, so a client can't turn them off (Guardrails evaluates system prompts only where the caller tags them).
 
 ### SuperApps: Claude Desktop (Cowork)
 
@@ -50,7 +50,7 @@ Two connection modes:
 
 ### Other CLI harnesses: OpenCode, Codex CLI, Pi, Aider
 
-Any harness that uses the AWS SDK default chain inherits the same SSO login, quota enforcement, per-user cost attribution, and IAM model/region guardrails with no extra auth work. Codex CLI is the exception for inference: its Amazon Bedrock path uses the Mantle endpoint, which governed credentials deny by design ([Harnesses Guide](assets/docs/HARNESSES.md#openai-codex-cli)). Generate ready-to-use, verified configs with:
+A harness that uses the AWS SDK default chain can use the same SSO login, quota enforcement, per-user cost attribution, and IAM model/region guardrails with no extra auth work. Codex CLI is the exception for inference: its Amazon Bedrock path uses the Mantle endpoint, which governed credentials deny by design ([Harnesses Guide](assets/docs/HARNESSES.md#openai-codex-cli)). Generate ready-to-use, verified configs with:
 
 ```bash
 poetry run gip package --harnesses all
