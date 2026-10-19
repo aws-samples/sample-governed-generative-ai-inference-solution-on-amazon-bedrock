@@ -36,6 +36,10 @@ def _profile(**overrides):
     p.metering_enabled = False  # explicit: Mock would otherwise auto-create a truthy attr
     p.allowed_bedrock_regions = []  # explicit: Mock would otherwise be a non-iterable truthy attr
     p.guardrails_enabled = False  # explicit: Mock would otherwise auto-create a truthy attr
+    p.effective_auth_type = "oidc"
+    p.skills_registry_enabled = False
+    p.model_lifecycle_enabled = False
+    p.distribution_legacy_disabled = False
     for k, v in overrides.items():
         setattr(p, k, v)
     return p
@@ -144,6 +148,55 @@ class TestSkipGuards:
         _, deleted = _run_destroy(_profile(monitoring_enabled=True, monitoring_mode="sidecar"))
         for stack in ("networking", "monitoring", "analytics", "s3bucket"):
             assert stack not in deleted, f"{stack} should be skipped in sidecar mode"
+
+    def test_sidecar_quota_deletes_s3bucket(self):
+        """Sidecar + quota deploys s3bucket for Lambda artifacts (deploy.py); destroy must remove it."""
+        _, deleted = _run_destroy(
+            _profile(monitoring_enabled=True, monitoring_mode="sidecar", quota_monitoring_enabled=True)
+        )
+        assert "s3bucket" in deleted
+        assert "quota" in deleted
+        for stack in ("networking", "monitoring", "analytics"):
+            assert stack not in deleted
+
+    def test_model_lifecycle_alone_deletes_s3bucket(self):
+        """Model lifecycle alerts deploy s3bucket even without monitoring."""
+        _, deleted = _run_destroy(_profile(monitoring_enabled=False, model_lifecycle_enabled=True))
+        assert "s3bucket" in deleted
+
+    def test_skills_registry_alone_deletes_s3bucket(self):
+        """The skills registry deploys s3bucket (deploy.py); destroy must remove it."""
+        _, deleted = _run_destroy(_profile(monitoring_enabled=False, skills_registry_enabled=True))
+        assert "s3bucket" in deleted
+
+    def test_sidecar_quota_without_user_auth_skips_s3bucket(self):
+        """deploy skips quota and s3bucket when auth is 'none'; destroy mirrors it."""
+        _, deleted = _run_destroy(
+            _profile(
+                monitoring_enabled=True,
+                monitoring_mode="sidecar",
+                quota_monitoring_enabled=True,
+                effective_auth_type="none",
+            )
+        )
+        assert "s3bucket" not in deleted
+
+    def test_explicit_s3bucket_argument_is_not_skipped(self):
+        _, deleted = _run_destroy(_profile(monitoring_enabled=False), stack_arg="s3bucket")
+        assert deleted == {"s3bucket"}
+
+    def test_explicit_distribution_argument_is_not_skipped(self):
+        _, deleted = _run_destroy(_profile(enable_distribution=False), stack_arg="distribution")
+        assert deleted == {"distribution"}
+
+    def test_legacy_disabled_distribution_is_deleted(self):
+        """Profiles saved with the old 'Disabled' choice still have a distribution stack to remove."""
+        _, deleted = _run_destroy(_profile(enable_distribution=False, distribution_legacy_disabled=True))
+        assert "distribution" in deleted
+
+    def test_disabled_distribution_is_skipped(self):
+        _, deleted = _run_destroy(_profile(enable_distribution=False))
+        assert "distribution" not in deleted
 
     def test_quota_deleted_only_when_enabled(self):
         _, with_it = _run_destroy(_profile(quota_monitoring_enabled=True))

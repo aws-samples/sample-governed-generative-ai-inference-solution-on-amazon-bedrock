@@ -79,6 +79,9 @@ class Profile:
 
     # Distribution platform configuration
     distribution_type: str | None = None  # "presigned-s3" | "landing-page" | None (disabled)
+    # Set when a profile was saved with the old wizard's "Disabled" choice, which still deployed the
+    # presigned-S3 distribution stack; destroy uses it to remove that stack.
+    distribution_legacy_disabled: bool = False
     distribution_idp_provider: str | None = None  # okta|azure|auth0|cognito|generic (landing-page only)
     distribution_idp_domain: str | None = None  # IdP domain for web auth (e.g., "company.okta.com")
     distribution_idp_client_id: str | None = None  # Web application client ID
@@ -416,6 +419,14 @@ class Profile:
                             data["provider_type"] = "google"
                 except Exception:
                     pass  # Leave provider_type unset if parsing fails
+
+        # Profiles written while the wizard's "Disabled" choice returned the string "Disabled"
+        # stored distribution as enabled; treat them as disabled.
+        if str(data.get("distribution_type") or "").lower() == "disabled":
+            if data.get("enable_distribution"):
+                data["distribution_legacy_disabled"] = True
+            data["distribution_type"] = None
+            data["enable_distribution"] = False
 
         # Migrate legacy distribution configuration
         if "enable_distribution" in data and data.get("enable_distribution"):
