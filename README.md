@@ -39,7 +39,7 @@ On the credential-process architecture, the same deployment extends to the deskt
 poetry run gip cowork generate
 ```
 
-This generates MDM configuration files (JSON, macOS .mobileconfig, Windows .reg) using your existing credential-process deployment profile — same credentials, same quotas, same dashboards. Gateway-based Desktop deployments use the upstream gateway-native bootstrap or its official [companion add-on](assets/docs/BOOTSTRAP_SERVER.md), unchanged. See the [Cowork 3P Guide](assets/docs/COWORK_3P.md); optional [web search via AgentCore](assets/docs/WEB_SEARCH.md).
+This generates MDM configuration files (JSON, macOS .mobileconfig, Windows .reg, and an Intune `Set-CoworkPolicy.ps1`) using your existing credential-process deployment profile — same credentials, same quotas, same dashboards. The .mobileconfig and .reg files carry a `__GIP_HOME__` placeholder that the installer resolves per user. For a central push, use the Intune script or replace the placeholder first ([details](assets/docs/COWORK_3P.md#deployment)). Gateway-based Desktop deployments use the upstream gateway-native bootstrap or its official [companion add-on](assets/docs/BOOTSTRAP_SERVER.md), unchanged. See the [Cowork 3P Guide](assets/docs/COWORK_3P.md); optional [web search via AgentCore](assets/docs/WEB_SEARCH.md).
 
 ### Claude Code (CLI)
 

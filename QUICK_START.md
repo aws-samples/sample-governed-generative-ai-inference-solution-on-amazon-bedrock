@@ -514,14 +514,20 @@ Deploys an AWS CodeBuild project to compile the Windows `.exe` binary using Nuit
 
 **Q: `Generate CoWork 3P MDM configuration during packaging?`**
 
-When **Yes**, every `gip package` run automatically produces MDM configuration files alongside the standard installer. These deploy Claude Desktop (Claude Cowork) pointing at Bedrock through the same credential infrastructure. No extra AWS resources required.
+When **Yes**, every `gip package` run also writes Claude Desktop (Claude Cowork) configuration files into the package, next to the installer. They point Claude Desktop at Bedrock through the same credential infrastructure. No extra AWS resources required.
 
-Output files in `dist/cowork-3p/`:
-- `cowork-3p.mobileconfig` — deploy via Jamf/Kandji/Mosyle (macOS). Unsigned profiles cannot auto-install: after delivery (or when `install.sh` runs), the user must approve the profile in **System Settings → Privacy & Security → Profiles**.
-- `cowork-3p.reg` — deploy via Intune/Group Policy (Windows). Writes to `HKCU\SOFTWARE\Policies\Claude` (per-user, no admin elevation); do not redirect to `HKLM`.
-- `cowork-3p-config.json` — raw MDM JSON for the Claude Desktop Setup UI / manual review
+Files in the package (`dist/<profile>/<timestamp>/`):
+- `cowork-3p.mobileconfig` (macOS)
+- `cowork-3p.reg` (Windows). Writes to `HKCU\SOFTWARE\Policies\Claude` (per-user, no admin elevation); do not redirect to `HKLM`.
+- `cowork-3p-config.json`: raw MDM JSON for the Claude Desktop Setup UI or manual review
 
-Claude Desktop authenticates via the `inferenceBedrockProfile` MDM key, which points at the AWS named profile that `install.sh` / `install.bat` writes to `~/.aws/config`. No per-user wrapper script is required. Users must run the installer **before** opening Claude Desktop — otherwise the named profile won't exist and Bedrock mode won't activate.
+By default Claude Desktop authenticates through the `inferenceCredentialHelper` key, which runs `credential-process --desktop` at an **absolute** path. Claude Desktop does not expand `~` or environment variables in these values, so the packaged files carry a `__GIP_HOME__` placeholder instead of a real home directory. **Don't push the packaged files as they are.** Use one of these paths:
+
+- **Per user (macOS and Windows):** the user runs the installer (`install.sh` or `install.bat`) **before** opening Claude Desktop. The installer writes copies with the user's real home directory to `~/gip/` (`cowork-3p.mobileconfig` and `cowork-3p-config.json` on macOS and Linux, `cowork-3p.reg` on Windows). On macOS the user opens `~/gip/cowork-3p.mobileconfig` and approves the profile in **System Settings → Privacy & Security → Profiles**. Unsigned profiles cannot auto-install. On Windows the user imports `~\gip\cowork-3p.reg`.
+- **Central (Windows / Intune):** run `gip cowork generate --format ps1` and deploy `Set-CoworkPolicy.ps1` as an Intune platform script that runs as the signed-in user. It fills in each user's home directory at run time.
+- **Central (any other MDM tool):** replace `__GIP_HOME__` with each user's absolute home directory before you push the file.
+
+Users still run the installer on every machine, because it installs the `credential-process` binary that these settings point at.
 
 See [COWORK_3P.md](assets/docs/COWORK_3P.md) for MDM deployment instructions.
 

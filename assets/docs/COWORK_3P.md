@@ -205,6 +205,13 @@ No wrapper script is required — CoWork reuses the same `credential-process` bi
 
 ## Deployment
 
+> **Files from `gip package` or `gip cowork generate` contain a `__GIP_HOME__` placeholder** in the credential-helper path, because Claude Desktop does not expand `~` or environment variables (see the **Absolute paths** note later on this page). Pushing those files unchanged through an MDM tool points Claude Desktop at a path that doesn't exist. Use one of these instead:
+> - **Per user:** the installer (`install.sh` / `install.bat`) writes resolved copies to `~/gip/`. The user opens `~/gip/cowork-3p.mobileconfig` and approves it (macOS), or imports `~\gip\cowork-3p.reg` (Windows).
+> - **Intune:** `gip cowork generate --format ps1`, then deploy `Set-CoworkPolicy.ps1` as a platform script that runs as the signed-in user. It resolves the home directory at run time.
+> - **Other MDM tools:** replace `__GIP_HOME__` with each user's absolute home directory before you push.
+>
+> The steps below describe building a profile by hand in the Claude Desktop setup UI, where you enter absolute paths yourself.
+
 ### macOS (MDM Configuration Profile)
 
 1. Create the MDM configuration JSON with your settings
@@ -370,7 +377,7 @@ The `headersHelper` is a tiny executable that `gip package` installs next to `cr
 
 That mode reads the cached id_token and silently refreshes it via the stored refresh token when expired; it **never** opens a browser (a headersHelper cannot drive an interactive login). The gateway's `CUSTOM_JWT` authorizer validates that id_token. An OIDC **id_token** carries `aud = clientId` for every provider, so the gateway is deployed with **`AllowedAudience = [clientId]`** (the template default) — there is no provider-specific authorizer to configure. The TTL is kept below the token lifetime (Cognito ~1h) so an expiring bearer is refreshed before it lapses.
 
-> **Absolute paths (important).** Claude Desktop on macOS does **not** expand `~` (or env vars) in MDM string values, so the `headersHelper`/`inferenceCredentialHelper` paths must be absolute. Because the `.mobileconfig` is generated centrally, the macOS paths embed a `__GIP_HOME__` placeholder and `install.sh` substitutes it with the user's real `$HOME` at install time — one artifact distributes centrally, each machine gets a correct absolute path. Windows uses the native `%USERPROFILE%`. To pin a fixed path yourself, set `websearch_headers_helper_path` on the profile (applied verbatim to every format).
+> **Absolute paths (important).** Claude Desktop does **not** expand `~` (or env vars) in MDM string values on macOS or Windows, so the `headersHelper`/`inferenceCredentialHelper` paths must be absolute. Because the files are generated centrally, the paths embed a `__GIP_HOME__` placeholder on both macOS and Windows. `install.sh` and `install.bat` write resolved copies to `~/gip/` with the user's real home directory, and `Set-CoworkPolicy.ps1` resolves it at run time. `%USERPROFILE%` would **not** work, because Claude Desktop reads the literal string. To pin a fixed path yourself, set `websearch_headers_helper_path` on the profile (applied verbatim to every format).
 
 > **Web Fetch.** Web search returns titles, URLs, and snippets; opening those result pages needs sandbox egress, which Cowork blocks by default. When web search is enabled, `gip` sets `coworkEgressAllowedHosts=["*"]` automatically (with a warning) so results are usable out of the box. `["*"]` allows egress to **all** hosts — **narrow it to a targeted domain list for production** by setting `coworkEgressAllowedHosts` yourself (e.g. via `cowork_3p_extra_keys`); an admin-provided value is never overwritten.
 

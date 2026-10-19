@@ -168,9 +168,11 @@ class CoworkGenerateCommand(Command):
             console.print(f"  • {f}")
 
         console.print("\n[bold]Next steps:[/bold]")
-        console.print("  macOS: Deploy .mobileconfig via Jamf, Kandji, or Mosyle")
-        console.print("  Windows (GPO/Intune): Import .admx template or run Set-CoworkPolicy.ps1")
-        console.print("  Windows (manual): Deploy .reg via Group Policy or SCCM")
+        console.print("  Paths contain __GIP_HOME__: don't push .mobileconfig or .reg unchanged.")
+        console.print("  Per user: run the package installer, then apply the resolved copy in ~/gip/")
+        console.print("    (macOS: open cowork-3p.mobileconfig and approve it; Windows: import cowork-3p.reg)")
+        console.print("  Windows (Intune): deploy Set-CoworkPolicy.ps1 as a platform script run as the user")
+        console.print("  Other MDM tools: replace __GIP_HOME__ with each user's home directory first")
         console.print("  Manual: Import cowork-3p-config.json via Claude Desktop Setup UI")
         console.print(
             "\n[dim]Docs: https://support.claude.com/en/articles/14680741"
