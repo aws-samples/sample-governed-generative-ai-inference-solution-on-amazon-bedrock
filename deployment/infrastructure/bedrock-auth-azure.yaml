@@ -26,6 +26,7 @@ Metadata:
           default: "Monitoring"
         Parameters:
           - EnableMonitoring
+          - MonitoringMode
     ParameterLabels:
       FederationType:
         default: "Federation method"
@@ -39,6 +40,8 @@ Metadata:
         default: "Restrict to Anthropic models only"
       EnableMonitoring:
         default: "Enable CloudWatch monitoring"
+      MonitoringMode:
+        default: "Monitoring mode (sidecar grants direct OTLP writes)"
       SessionNameBinding:
         default: "Bind STS session name to identity claim"
       AzureTenantId:
@@ -123,6 +126,16 @@ Parameters:
       - 'false'
     Description: Enable CloudWatch monitoring for Bedrock usage
 
+  MonitoringMode:
+    Type: String
+    Default: 'central'
+    AllowedValues:
+      - 'central'
+      - 'sidecar'
+    Description: >-
+      Monitoring mode. Only 'sidecar' grants direct OTLP metric writes, which the local collector
+      needs; central mode exports through the ALB collector and does not need them.
+
   SessionNameBinding:
     Type: String
     Default: none
@@ -143,6 +156,9 @@ Conditions:
   UseDirectIAM: !Equals [!Ref FederationType, direct]
   UseCognitoIdentity: !Equals [!Ref FederationType, cognito]
   MonitoringEnabled: !Equals [!Ref EnableMonitoring, 'true']
+  SidecarOtlpIngest: !And
+    - !Condition MonitoringEnabled
+    - !Equals [!Ref MonitoringMode, 'sidecar']
   AnthropicModelsOnly: !Equals [!Ref RestrictToAnthropicModels, 'true']
   BindSessionToEmail: !Equals [!Ref SessionNameBinding, email]
   BindSessionToSub: !Equals [!Ref SessionNameBinding, sub]
@@ -229,6 +245,17 @@ Resources:
               - AnthropicModelsOnly
               - - !Sub 'arn:${AWS::Partition}:bedrock:::foundation-model/anthropic.*'
               - - !Sub 'arn:${AWS::Partition}:bedrock:::foundation-model/*'
+          # Claude Desktop's credential helper returns a short-term Amazon Bedrock API key
+          # (a presigned CallWithBearerToken URL signed with these credentials). The action
+          # has no resource type, so it is scoped by Region and token type instead.
+          - Sid: AllowBedrockShortTermBearerToken
+            Effect: Allow
+            Action: 'bedrock:CallWithBearerToken'
+            Resource: '*'
+            Condition:
+              StringEquals:
+                'aws:RequestedRegion': !Ref AllowedBedrockRegions
+                'bedrock:BearerTokenType': 'SHORT_TERM'
           # F-011: Enforced guardrails require callers to apply the selected
           # guardrail during model invocation.
           - Sid: AllowOwnAccountGuardrails
@@ -271,6 +298,21 @@ Resources:
                   'cloudwatch:namespace':
                     - 'GIP/Bedrock/Usage'
                     - 'AWS/Bedrock'
+            - !Ref 'AWS::NoValue'
+          # The sidecar collector exports OTLP metrics to the CloudWatch OTLP endpoint.
+          # OTLP ingest carries no cloudwatch:namespace and is authorized against the
+          # account's OTLP dataset, so the namespace statement above denies it (HTTP 403).
+          # This statement allows only namespace-less (OTLP) writes, only to that dataset.
+          - !If
+            - SidecarOtlpIngest
+            - Sid: AllowCloudWatchOtlpMetrics
+              Effect: Allow
+              Action:
+                - 'cloudwatch:PutMetricData'
+              Resource: !Sub 'arn:${AWS::Partition}:cloudwatch:*:${AWS::AccountId}:dataset/default'
+              Condition:
+                'Null':
+                  'cloudwatch:namespace': 'true'
             - !Ref 'AWS::NoValue'
 
   # ===============================================

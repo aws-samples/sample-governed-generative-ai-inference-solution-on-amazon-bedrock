@@ -36,8 +36,9 @@ addressed, and which remain follow-ups.
    trust policy (`bedrock-auth-okta.yaml:166-174`) has no
    `sts:RoleSessionName` condition, so a modified client can attribute usage
    to any string. CloudTrail/CUR attribution is therefore spoofable by a
-   malicious insider (quota enforcement is not affected for OIDC — the quota
-   API identity comes from the validated JWT). Mitigation: add a trust-policy
+   malicious insider (the quota API identity comes from the validated JWT, but
+   in sidecar mode the usage figures themselves are client-asserted; see
+   Current Limitations in `assets/docs/QUOTA_MONITORING.md`). Mitigation: add a trust-policy
    condition binding the session name, or use `sts:SourceIdentity`.
 3. **Quota enforcement trusts client telemetry and is bounded by session
    lifetime.** **RESOLVED (Phase 1)** (`f555a1b`, server-side metering stack: shadow reconciliation + `METERING_MODE=max`; strict mode gated on cache-token fidelity). Usage is measured from client OTEL (sidecar can be stopped —

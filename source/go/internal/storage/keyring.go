@@ -13,7 +13,8 @@ const serviceName = "governed-inference-platform"
 
 func openKeyring() (keyring.Keyring, error) {
 	return keyring.Open(keyring.Config{
-		ServiceName: serviceName,
+		ServiceName:     serviceName,
+		AllowedBackends: osKeyringBackends(),
 		// macOS Keychain
 		KeychainName:             "login",
 		KeychainTrustApplication: true,
@@ -22,6 +23,23 @@ func openKeyring() (keyring.Keyring, error) {
 		// Windows Credential Manager
 		WinCredPrefix: serviceName,
 	})
+}
+
+// osKeyringBackends lists the available keyring backends except the file
+// backend. openKeyring configures no directory for it, so every operation on it
+// fails with "No directory provided for file keyring". On a machine with no OS
+// keyring (headless Linux without a Secret Service) Open used to return that
+// unusable backend; leaving it out makes Open report that no keyring exists, so
+// callers that clear tokens know nothing could have been stored there. The
+// slice is never nil, because keyring.Open treats nil as "all backends".
+func osKeyringBackends() []keyring.BackendType {
+	backends := []keyring.BackendType{}
+	for _, backend := range keyring.AvailableBackends() {
+		if backend != keyring.FileBackend {
+			backends = append(backends, backend)
+		}
+	}
+	return backends
 }
 
 // ReadFromKeyring reads AWS credentials from the OS keyring.
@@ -140,7 +158,10 @@ func ReadMonitoringTokenFromKeyring(profile string) (*MonitoringTokenData, error
 	if err != nil {
 		return nil, err
 	}
+	return readMonitoringTokenFromKeyringImpl(kr, profile)
+}
 
+func readMonitoringTokenFromKeyringImpl(kr keyringRW, profile string) (*MonitoringTokenData, error) {
 	item, err := kr.Get(profile + "-monitoring")
 	if err != nil {
 		return nil, err

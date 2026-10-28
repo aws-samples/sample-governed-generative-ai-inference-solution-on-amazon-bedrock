@@ -70,7 +70,7 @@ operator break-glass choice.
 | **credential-process quota check (client)** | Quota API unreachable / non-200 at credential issuance or 30-min re-check | Deny credentials (`quota_fail_mode` defaults to `"closed"`, `source/go/internal/config/config.go:216-217`; applies even when no usable ID token exists — the check is never silently skipped, `cmd/credential-process/main.go:709-725`) | Quota-enabled developers cannot get new/refreshed AWS credentials; cached STS credentials keep working until expiry | Fix the quota stack ([RUNBOOKS.md §3](RUNBOOKS.md#3-quota-subsystem-failure)); break-glass: set `quota_fail_mode: "open"` in the client profile | **Fail-closed** (enforcement) |
 | **Quota API / DynamoDB (server)** | `gip-quota-check` Lambda errors, DynamoDB throttling/outage | Lambda returns deny on internal error (`ERROR_HANDLING_MODE` defaults to `fail_closed`; the template does not override it) | Same as above — credential issuance blocked for quota-enabled clients | [RUNBOOKS.md §3](RUNBOOKS.md#3-quota-subsystem-failure): check Lambda logs + DynamoDB throttles; emergency levers: flip `ERROR_HANDLING_MODE`, switch policies to alert-only, or `gip quota unblock` | **Fail-closed** (enforcement) |
 | **OTEL collector — central mode** | ECS collector/ALB down; dashboards flat | Inference unaffected (credentials and Bedrock access do not pass through the collector). Client OTLP exports fail; metrics for the window are dropped, not backfilled | Usage during the outage is invisible to quota — silent under-enforcement (see note below), permanent dashboard gap | `<stack>-collector-unhealthy` alarm fires (ALB `HealthyHostCount < 1` for 3 min); restart tasks / redeploy per [RUNBOOKS.md §2](RUNBOOKS.md#2-otel-collector-outage-central-mode) | **Fail-visible** (telemetry); enforcement silently under-counts unless metering `max` mode is on |
-| **OTEL sidecar — sidecar mode** | Developer's local sidecar stopped (crash or tampering) | That user's usage stops being counted; inference unaffected | Same under-count, but per-user and deliberate tampering is possible | Opt-in [sidecar bypass detection](QUOTA_MONITORING.md#sidecar-bypass-detection) (CloudTrail-vs-DynamoDB join, SNS alert) or metering drift alerts | Telemetry fail-open by construction; **fail-visible** only with bypass detection or metering enabled |
+| **OTEL sidecar — sidecar mode** | Developer's local sidecar stopped (crash or tampering), or usage sent under another user's email | That user's usage stops being counted; inference unaffected. Identity on sidecar telemetry is client-asserted, so a user can also report usage under a colleague's email | Same under-count, but per-user and deliberate tampering is possible in both directions: a user can hide their own usage, or inflate a colleague's and push them over quota ([forged sidecar attribution](#forged-sidecar-attribution)) | Opt-in [sidecar bypass detection](QUOTA_MONITORING.md#sidecar-bypass-detection) (CloudTrail-vs-DynamoDB join, SNS alert) or metering drift alerts | Telemetry fail-open by construction; **fail-visible** only with bypass detection or metering enabled |
 | **Server-side metering** | Invocation-log delivery or processor Lambda failure | `server_*` accrual stalls; enforcement falls back to client-reported figures (`max(client, server)` in `max` mode); dedup markers guarantee retries never double-count | No developer-facing impact; tamper-resistance temporarily reduced | Alarms on processor errors, SQS DLQ depth, and Bedrock `ModelInvocationLogsCloudWatchDeliveryFailure` ([QUOTA_MONITORING.md](QUOTA_MONITORING.md#server-side-metering-tamper-proof-usage)); redrive the DLQ | **Fail-visible** for raised errors and delivery failures |
 | **Metering record validation** | Malformed record, missing `requestId`, invalid token count, or zero total tokens | Reject before dedup/accrual; emit a structured content-free error log plus the `GIP/Metering` `InvalidRecords` metric | `max` enforcement and reconciliation may temporarily use an incomplete server total; no invalid record is marked as processed | `${stack}-invalid-records` alarms on any rejection; inspect `invalid_metering_record` logs, correct the source/processor, then replay because no `DEDUP#` marker was committed | **Fail-visible** (telemetry) |
 | **Analytics pipeline (Firehose -> S3 -> Athena)** | Transform/delivery failures | Failed records land under the bucket's `error/` prefix (`analytics-pipeline.yaml` `ErrorOutputPrefix`); enforcement and dashboards are unaffected (quota reads CloudWatch, not S3) | Gap in historical/cost reporting only | Inspect the `error/` prefix; no built-in CloudWatch alarm on delivery failure — monitor `AWS/Firehose` `DeliveryToS3.Success` yourself if analytics gaps matter | Fail-open for reporting; visibility is **partial** (error records retained, but not alarmed) |
@@ -97,6 +97,27 @@ independent of the collector, so collector outages stop creating a silent
 enforcement gap in metered regions. Invalid invocation records can still delay
 accrual, but they now produce an alarm and remain replayable because validation
 runs before dedup marker construction.
+
+### Forged sidecar attribution
+
+In sidecar mode the user identity on telemetry is client-asserted: the local
+collector copies `user.email` from request headers that the developer's own
+machine supplies, and the developer's federated role may write OTLP metrics to
+the account's CloudWatch dataset. Any user with valid credentials can therefore
+post usage under another user's email. That under-counts their own usage, and
+it can also push a colleague over quota so that the colleague is denied
+credentials. Neither fail-mode triggers, because nothing errors. `max` metering
+mode does not prevent the wrongful block, because it enforces the larger of the
+client and server figures.
+
+**Closing it:** for enforcement that must resist this, use central mode, where
+the collector takes `user.email` from the ALB-validated JWT, with
+[server-side metering](QUOTA_MONITORING.md#server-side-metering-tamper-proof-usage).
+Central mode doesn't grant the direct dataset write: the auth templates
+allow `AllowCloudWatchOtlpMetrics` only when `MonitoringMode=sidecar`, which
+`gip deploy` sets from the profile, so users can't post telemetry around the
+central collector. Sidecar bypass detection
+does not catch forged attribution.
 
 ## Design boundaries this posture rests on
 

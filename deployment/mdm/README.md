@@ -113,8 +113,10 @@ For environments that prefer script-based deployment over ADMX:
 1. Edit `Set-CoworkPolicy.ps1` — update the `$config` hashtable with your values
 2. In Intune: **Devices → Scripts and remediations → Platform scripts → Add**
 3. Settings:
-   - Run this script using the logged on credentials: **Yes** (writes to HKCU)
+   - Run this script using the logged on credentials: **Yes** (it still fails for standard users; see the note below)
    - Run script in 64 bit PowerShell Host: **Yes**
+
+> **Standard users:** Windows grants standard users read-only access to `HKCU\SOFTWARE\Policies`, so this script fails on their devices when it runs with their credentials (access denied on `New-Item` / `Set-ItemProperty`). With **Run this script using the logged on credentials: No** it runs as SYSTEM and writes SYSTEM's own `HKCU`, not the user's. It works only in an elevated session of the user's own account. For standard users, use the ADMX profile above: it sets the AWS profile name, which is the legacy AWS profile mode and needs Keyring credential storage (see the boto3 caveat in [COWORK_3P.md](../../assets/docs/COWORK_3P.md#aws-profile-mode-legacy)). Neither this script nor the ADMX path has been validated end to end or tested with Intune.
 
 ## Registry Path
 

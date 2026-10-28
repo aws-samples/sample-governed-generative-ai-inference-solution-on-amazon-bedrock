@@ -2,11 +2,15 @@ package storage
 
 import (
 	"encoding/json"
+	"errors"
+	"fmt"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"time"
 
 	"gip-go/internal/jwt"
+	"github.com/99designs/keyring"
 )
 
 // GetMonitoringToken retrieves a valid monitoring token from the configured storage.
@@ -103,4 +107,52 @@ func saveMonitoringTokenToFile(data *MonitoringTokenData, profile string) error 
 		return err
 	}
 	return nil
+}
+
+// ErrMonitoringTokenNotCleared reports that ClearMonitoringToken could neither
+// delete nor overwrite the cached id_token, so the next credential-process run
+// may still use it to re-federate without signing in.
+var ErrMonitoringTokenNotCleared = errors.New("cached monitoring token (id_token) may remain")
+
+// ClearMonitoringToken removes the cached monitoring id_token for a profile
+// from the session file and the OS keyring. credential-process re-federates
+// silently with that token until it expires (about an hour), so --clear-cache
+// must remove it as well as the refresh token to force a new sign-in.
+//
+// A nil error means no usable cached token remains. An error that does not
+// wrap ErrMonitoringTokenNotCleared means the keyring item could not be
+// deleted but was overwritten with an empty, expired token (see
+// clearRefreshTokenFromKeyringImpl for why a delete can be refused).
+func ClearMonitoringToken(profile string) error {
+	var fileErr error
+	path := filepath.Join(sessionDir(), profile+"-monitoring.json")
+	if err := os.Remove(path); err != nil && !errors.Is(err, fs.ErrNotExist) {
+		fileErr = fmt.Errorf("%w: remove %s: %v", ErrMonitoringTokenNotCleared, path, err)
+	}
+	kr, err := openKeyring()
+	if err != nil {
+		// No keyring backend: SaveMonitoringToken could not have stored one there.
+		return fileErr
+	}
+	return errors.Join(fileErr, clearMonitoringTokenFromKeyringImpl(kr, profile))
+}
+
+// clearMonitoringTokenFromKeyringImpl deletes the <profile>-monitoring item
+// and, when the keyring refuses the delete, overwrites it with an empty token
+// that has no expiry, which GetMonitoringToken treats as no token. It never
+// creates an item that is not there.
+func clearMonitoringTokenFromKeyringImpl(kr keyringRW, profile string) error {
+	key := profile + "-monitoring"
+	removeErr := kr.Remove(key)
+	if removeErr == nil || errors.Is(removeErr, keyring.ErrKeyNotFound) || errors.Is(removeErr, fs.ErrNotExist) {
+		return nil
+	}
+	empty, err := json.Marshal(MonitoringTokenData{Profile: profile})
+	if err != nil {
+		return fmt.Errorf("%w: delete %s: %v; overwrite: %v", ErrMonitoringTokenNotCleared, key, removeErr, err)
+	}
+	if setErr := kr.Set(keyring.Item{Key: key, Data: empty}); setErr != nil {
+		return fmt.Errorf("%w: delete %s: %v; overwrite: %v", ErrMonitoringTokenNotCleared, key, removeErr, setErr)
+	}
+	return fmt.Errorf("could not delete keyring item %s (%v); overwrote it with an empty token", key, removeErr)
 }

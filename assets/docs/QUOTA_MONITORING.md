@@ -824,6 +824,11 @@ Sidecar bypass detection is an **opt-in detective control** that surfaces this.
 It does not block access; it reports which users are invoking Bedrock without
 reporting telemetry, so administrators can follow up.
 
+Stopping the sidecar is not the only gap. The user identity on sidecar telemetry
+is client-asserted, so a user can also send usage under another user's email
+and push that user over quota. Bypass detection does not catch this; see
+[Current Limitations](#current-limitations).
+
 ### How It Works
 
 A scheduled Lambda (`gip-bypass-detection`) runs every 15 minutes and:
@@ -884,6 +889,7 @@ gip deploy quota --parameters EnableBypassDetection=true
 - Requires email claim in JWT tokens, or email as IAM session name for Identity Center users (see [IAM Identity Center Setup](providers/iam-identity-center-setup.md))
 - Group membership requires JWT group claims from identity provider (not available for IDC users — user-level policies only)
 - Enforcement only at credential issuance (see [Enforcement Timing](#enforcement-timing) for mitigation)
+- **Sidecar attribution is client-asserted, in both directions.** In sidecar mode the `user.email` on telemetry comes from the developer's own machine (the local collector copies it from request headers), and the developer's federated role may write OTLP metrics to the account's CloudWatch dataset. A user with valid credentials can therefore report usage under another user's email: hide their own usage, or inflate a colleague's and push them over quota so that the colleague is blocked. `max` metering mode does not prevent the second case, because it enforces the larger of the client and server figures. For enforcement that must resist this, use central mode, where the collector takes `user.email` from the ALB-validated JWT, with [server-side metering](#server-side-metering-tamper-proof-usage). Central mode doesn't grant that direct dataset write: the auth templates allow `AllowCloudWatchOtlpMetrics` only when `MonitoringMode=sidecar`, which `gip deploy` sets from the profile.
 
 ## CoWork 3P Usage Counting
 

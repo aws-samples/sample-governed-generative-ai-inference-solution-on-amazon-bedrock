@@ -140,6 +140,11 @@ deployments:
   this automatically for the `bedrock-auth-*` stacks it manages; for the legacy
   `cognito-identity-pool.yaml` (parameter `OIDCThumbprintList`) the operator
   passes it by hand.
+- **Sidecar monitoring: set `MonitoringMode=sidecar`.** When you create or update a
+  `bedrock-auth-*` or `cognito-identity-pool.yaml` stack for sidecar monitoring, set
+  `MonitoringMode=sidecar`. The default `central` omits the `AllowCloudWatchOtlpMetrics`
+  statement, and the local collector's OTLP exports then fail with HTTP 403, so quota
+  usage stays at 0. `gip deploy` sets it from the profile.
 - **Client packaging still needs tooling.** Installers, client binaries, and
   the generated `config.json`/`settings.json` come from `gip package` (or the
   binaries built with `make` in `source/go`; macOS targets need a macOS host) — see the

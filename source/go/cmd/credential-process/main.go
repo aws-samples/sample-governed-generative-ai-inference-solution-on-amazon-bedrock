@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"flag"
 	"fmt"
 	"os"
@@ -121,7 +122,9 @@ func main() {
 	// Flag dispatch — must run before auth-type branching so IDC users
 	// can use --get-monitoring-token, --show-tags, etc.
 	if *clearCache {
-		app.clearCache()
+		if !app.clearCache(true) {
+			os.Exit(1)
+		}
 		os.Exit(0)
 	}
 	if *showTags {
@@ -287,11 +290,41 @@ func (a *credentialApp) expireCredentialCache() {
 	_ = storage.RemoveFromCredentialsFile(a.profile)
 }
 
-func (a *credentialApp) clearCache() {
+// clearCache expires the cached AWS credentials and removes the refresh token.
+// With forceSignIn (--clear-cache) it also removes the cached id_token, which
+// run() would otherwise use to re-federate silently until it expires (about an
+// hour), so the next run has to sign in. The internal callers (a retryable STS
+// failure, a quota block) keep the id_token: a blocked user is then refused
+// again on the next run without a browser window opening.
+//
+// It returns false, and says so on stderr, when a token could not be cleared.
+func (a *credentialApp) clearCache(forceSignIn bool) bool {
 	a.expireCredentialCache()
-	// Clear refresh token
-	storage.ClearRefreshToken(a.profile)
+	cleared := true
+	if err := storage.ClearRefreshToken(a.profile); err != nil {
+		if errors.Is(err, storage.ErrRefreshTokenNotCleared) {
+			fmt.Fprintf(os.Stderr, "Warning: %v\n", err)
+			cleared = false
+		} else {
+			debugPrint("Refresh token: %v", err)
+		}
+	}
+	if forceSignIn {
+		if err := storage.ClearMonitoringToken(a.profile); err != nil {
+			if errors.Is(err, storage.ErrMonitoringTokenNotCleared) {
+				fmt.Fprintf(os.Stderr, "Warning: %v\n", err)
+				cleared = false
+			} else {
+				debugPrint("Monitoring token: %v", err)
+			}
+		}
+	}
+	if !cleared {
+		fmt.Fprintf(os.Stderr, "Error: could not clear every cached token for profile '%s'; the next run may not ask you to sign in.\n", a.profile)
+		return false
+	}
 	fmt.Fprintf(os.Stderr, "Cleared cached credentials for profile '%s'\n", a.profile)
+	return true
 }
 
 func (a *credentialApp) getMonitoringToken() int {
@@ -590,7 +623,7 @@ func (a *credentialApp) run() int {
 	awsCreds, err := a.getAWSCredentials(authResult)
 	if err != nil {
 		if federation.IsRetryableAuthError(err) {
-			a.clearCache()
+			a.clearCache(false)
 			fmt.Fprintf(os.Stderr, "Authentication failed - cached credentials were invalid and have been cleared.\nPlease try again to re-authenticate.\n")
 		} else {
 			fmt.Fprintf(os.Stderr, "Error: %v\n", err)
@@ -823,7 +856,9 @@ func (a *credentialApp) tryRefreshToken() *oidc.AuthResult {
 		// what permanently disabled silent renewal until the next browser login.
 		if oidc.IsDefinitiveRefreshFailure(err) {
 			debugPrint("Refresh_token rejected by IdP (invalid_grant); clearing stored token")
-			storage.ClearRefreshToken(a.profile)
+			if clearErr := storage.ClearRefreshToken(a.profile); clearErr != nil {
+				debugPrint("Refresh token: %v", clearErr)
+			}
 		} else {
 			debugPrint("Transient refresh failure; retaining refresh_token for next attempt")
 		}
@@ -929,7 +964,7 @@ func (a *credentialApp) performQuotaRecheck() bool {
 	if !qr.Allowed {
 		printQuotaBlocked(qr)
 		// Clear cached credentials so subsequent invocations also block
-		a.clearCache()
+		a.clearCache(false)
 		return false
 	}
 	printQuotaWarning(qr)

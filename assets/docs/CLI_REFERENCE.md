@@ -320,6 +320,8 @@ poetry run gip test [options]
 - Tests Bedrock API access in configured regions
 - Tests inference profile availability
 - Tests quota monitoring API (if enabled)
+- In sidecar monitoring mode, checks that the packaged collector binary runs (`otelcol components`: no port, no credentials) and has every component the config uses, then sends an empty, SigV4-signed OTLP export to the CloudWatch OTLP endpoint with the test credentials. HTTP 403 means the federated role's IAM policy blocks OTLP metrics, so usage would not reach CloudWatch
+- Adds a temporary `[profile gip-test-<id>]` to your AWS config for these calls and removes it when the test ends, including on failure or Ctrl-C
 
 **Quota Testing (`--quota-only`):**
 

@@ -253,6 +253,41 @@ Ensure your Identity Center permission set includes:
 }
 ```
 
+#### Sidecar telemetry and Claude Desktop
+
+For IAM Identity Center profiles, credential-process returns the permission set's role credentials directly. It does not assume the `BedrockIDCRole` that `bedrock-auth-idc.yaml` creates, so the statements that role carries for sidecar telemetry and Claude Desktop do not apply at run time. Add them to the permission set's inline policy as well:
+
+- `AllowCloudWatchOtlpMetrics` lets the sidecar collector export OTLP metrics. Without it CloudWatch rejects the export with HTTP 403 (`not authorized to perform: cloudwatch:PutMetricData`). Add it only for sidecar monitoring: it lets the user write metrics under any identity (see [Quota Monitoring](../QUOTA_MONITORING.md#current-limitations)).
+- `AllowBedrockShortTermBearerToken` lets Claude Desktop use the short-term Amazon Bedrock API key that `credential-process --desktop` returns.
+
+They are the statements of the same names in `bedrock-auth-okta.yaml`. Replace `<ACCOUNT_ID>` with the account the permission set is assigned to and the Region list with your allowed Bedrock Regions. In other partitions, use that partition's ARN prefix (for example `arn:aws-us-gov:`).
+
+```json
+{
+    "Sid": "AllowCloudWatchOtlpMetrics",
+    "Effect": "Allow",
+    "Action": ["cloudwatch:PutMetricData"],
+    "Resource": "arn:aws:cloudwatch:*:<ACCOUNT_ID>:dataset/default",
+    "Condition": {
+        "Null": {"cloudwatch:namespace": "true"}
+    }
+},
+{
+    "Sid": "AllowBedrockShortTermBearerToken",
+    "Effect": "Allow",
+    "Action": "bedrock:CallWithBearerToken",
+    "Resource": "*",
+    "Condition": {
+        "StringEquals": {
+            "aws:RequestedRegion": ["<REGION_1>", "<REGION_2>"],
+            "bedrock:BearerTokenType": "SHORT_TERM"
+        }
+    }
+}
+```
+
+The OTLP grant lets any user of the permission set write metrics under any identity; see the sidecar caveat in [Quota Monitoring](../QUOTA_MONITORING.md#current-limitations).
+
 ## Migration from OIDC to IDC
 
 To switch an existing OIDC profile to IDC:
