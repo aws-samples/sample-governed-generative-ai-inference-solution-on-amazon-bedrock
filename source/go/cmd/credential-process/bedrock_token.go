@@ -21,6 +21,12 @@ const (
 	tokenExpirySec = 43200 // 12 hours
 )
 
+// emptyPayloadSHA256 is the SHA-256 of an empty request body. botocore's SigV4QueryAuth, which
+// aws-bedrock-token-generator uses, signs this hash for the CallWithBearerToken presign. Amazon
+// Bedrock rejects tokens signed with "UNSIGNED-PAYLOAD" (the S3 presign convention):
+// "Authentication failed: Please make sure your API Key is valid." (end-to-end test, 2026-10-27).
+const emptyPayloadSHA256 = "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+
 // generateBedrockToken creates a presigned Bedrock bearer token from AWS credentials.
 // Implements the same logic as aws-bedrock-token-generator-python:
 //  1. Build a SigV4 presigned URL to bedrock.amazonaws.com with Action=CallWithBearerToken
@@ -28,11 +34,16 @@ const (
 //  3. Base64 encode
 //  4. Prefix with "bedrock-api-key-"
 func generateBedrockToken(accessKeyID, secretAccessKey, sessionToken, region string) (string, error) {
+	return generateBedrockTokenAt(accessKeyID, secretAccessKey, sessionToken, region, time.Now())
+}
+
+// generateBedrockTokenAt is generateBedrockToken with an explicit signing time, for known-answer tests.
+func generateBedrockTokenAt(accessKeyID, secretAccessKey, sessionToken, region string, at time.Time) (string, error) {
 	if accessKeyID == "" || secretAccessKey == "" || region == "" {
 		return "", fmt.Errorf("credentials and region are required")
 	}
 
-	now := time.Now().UTC()
+	now := at.UTC()
 
 	// Build query parameters
 	params := url.Values{}
@@ -65,8 +76,8 @@ func generateBedrockToken(accessKeyID, secretAccessKey, sessionToken, region str
 	}
 
 	// Canonical request
-	canonicalRequest := fmt.Sprintf("POST\n/\n%s\nhost:%s\n\nhost\nUNSIGNED-PAYLOAD",
-		canonicalQuery.String(), bedrockHost)
+	canonicalRequest := fmt.Sprintf("POST\n/\n%s\nhost:%s\n\nhost\n%s",
+		canonicalQuery.String(), bedrockHost, emptyPayloadSHA256)
 
 	// String to sign
 	stringToSign := fmt.Sprintf("AWS4-HMAC-SHA256\n%s\n%s/%s/%s/aws4_request\n%s",

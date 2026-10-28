@@ -13,6 +13,26 @@ Changes on this fork relative to upstream `beta`.
 
 ### Changed
 
+- **IAM: the federated role gains two statements in all eight auth templates**
+  (`bedrock-auth-okta`, `-azure`, `-auth0`, `-google`, `-generic`,
+  `-cognito-pool` and `-idc.yaml`, and `cognito-identity-pool.yaml`).
+  `AllowCloudWatchOtlpMetrics`, present only in sidecar mode (new
+  `MonitoringMode` parameter, default `central`; `gip deploy` sets it from the
+  profile, and console or hand-deployed sidecar stacks must set
+  `MonitoringMode=sidecar` or the collector's exports fail with HTTP 403), allows
+  `cloudwatch:PutMetricData` without a namespace, only on the account's OTLP
+  dataset (`arn:<partition>:cloudwatch:*:<account>:dataset/default`), which the
+  sidecar collector's OTLP export needs. `AllowBedrockShortTermBearerToken`
+  allows `bedrock:CallWithBearerToken` on `*`, only for `SHORT_TERM` tokens and
+  only in `AllowedBedrockRegions`, which Claude Desktop's short-term Amazon
+  Bedrock API key needs. Classic metric publishing stays scoped to the usage
+  namespaces. Redeploy the auth stack to apply them. In sidecar mode the OTLP
+  grant lets any federated user write metrics under any identity; see Current
+  Limitations in `QUOTA_MONITORING.md`. IAM Identity
+  Center credentials come from the permission set, not `BedrockIDCRole`, so add
+  the bearer-token statement, and for sidecar monitoring the OTLP statement, to
+  the permission set
+  (`assets/docs/providers/iam-identity-center-setup.md`).
 - Claude Apps Gateway and Claude Desktop bootstrap now use a verified fetch of
   the exact `aws-samples/anthropic-on-aws` commit pinned in `UPSTREAM.json`.
   The upstream subtrees are not committed; the fetch reconstructs and checks
@@ -171,6 +191,50 @@ Changes on this fork relative to upstream `beta`.
 
 ### Fixed
 
+The first nine entries were found in an end-to-end sidecar-mode test on
+2026-10-26 and 2026-10-27.
+
+- **Sidecar collector never started on macOS and Linux.** Packages install the
+  Go `otel-helper`, and only the shell, PowerShell and Python helpers started
+  `~/gip/otelcol`, so nothing listened on `localhost:4318` and sidecar usage
+  never reached CloudWatch. The Go helper now starts the collector under the
+  `<profile>-collector` profile, at most once. It skips the start when the
+  receiver port already answers (for example the CoWork `otel-helper --proxy`)
+  and keeps debug switches and tokens out of the collector's environment.
+  Windows is unchanged; see Known limitations.
+- **Sidecar OTLP export was denied (HTTP 403).** The namespace-scoped
+  `PutMetricData` statement could not authorize OTLP ingest, which carries no
+  namespace, so quota usage stayed at 0. Fixed by `AllowCloudWatchOtlpMetrics`
+  (see Changed).
+- **Claude Desktop bearer tokens failed to authenticate.** `credential-process
+  --desktop` presigned the token with `UNSIGNED-PAYLOAD`; it now signs the
+  empty-body hash, as botocore does, pinned by a known-answer test.
+- **Claude Desktop bearer tokens were not authorized** (`not authorized to
+  perform: bedrock:CallWithBearerToken on resource: *`): the action has no
+  resource type, so the model-ARN statements never matched. Fixed by
+  `AllowBedrockShortTermBearerToken` (see Changed).
+- **`credential-process --clear-cache` did not force a new sign-in.** It left
+  the cached id_token, which the next run used to re-federate silently for up
+  to an hour, and left the refresh token when the macOS Keychain refused the
+  delete (an item created by another build). It now deletes both, or
+  overwrites a refused item with an empty token, and exits 1, saying so, when a
+  token could not be cleared.
+- **`gip test` left `[profile gip-test-*]` sections in the AWS config.** The
+  config is now restored when the test ends, on success, failure or Ctrl-C,
+  byte for byte unless something else changed it meanwhile. A symlinked
+  `~/.aws/config` stays a symlink.
+- **Windows Claude Desktop policy instructions were wrong for standard users.**
+  Importing `cowork-3p.reg`, or removing its values, needs an elevated session
+  of the user's own account. The generated `Set-CoworkPolicy.ps1` does not work
+  for standard users, and the ADMX alternative uses the legacy AWS profile mode,
+  needs Keyring credential storage and has not been validated end to end.
+- **`gip test` passed while the role could not export OTLP metrics.** A new
+  sidecar-only "OTLP Metrics Export" check sends an empty, signed OTLP export
+  and fails on HTTP 403; under the old policy CloudWatch returned 403 for it
+  (`assets/docs/LIVE_VALIDATION.md`). The "Local Collector" check now inspects
+  the binary with `otelcol components` instead of starting a second collector.
+- **`gip deploy` in sidecar mode printed errors for stacks it does not deploy**
+  (networking and the central collector) in its summary.
 - The landing-page distribution backend verifies the ALB-signed identity header
   before trusting it: the token must use `ES256`, must carry this deployment's
   load balancer ARN in its `signer` field, and must not be expired, and its
@@ -277,6 +341,15 @@ Changes on this fork relative to upstream `beta`.
 - init wizard: the sidecar monitoring mode description incorrectly stated that
   Claude Desktop telemetry is not supported; sidecar mode is supported via the
   local otel-helper proxy (`otel-helper --proxy`).
+
+### Known limitations
+
+- **Windows sidecar collector does not start.** On Windows nothing starts
+  `otelcol.exe` in the normal path: Claude Code runs `otel-helper.cmd`, which
+  falls back to `otel-helper.ps1`, the only Windows launcher, only when
+  `otel-helper.exe` fails. Sidecar usage from Windows devices therefore does not
+  reach CloudWatch. `install.bat` prints a warning in sidecar mode; use central
+  mode where Windows usage must be counted.
 
 ### Documentation
 

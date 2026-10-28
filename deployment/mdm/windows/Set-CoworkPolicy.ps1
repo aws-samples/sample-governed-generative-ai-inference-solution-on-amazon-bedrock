@@ -6,9 +6,17 @@
     Writes CoWork 3P registry values to HKCU\SOFTWARE\Policies\Claude.
     Claude Desktop reads these at launch as managed MDM policy.
 
+    Standard users can read that key but not write it, so this script fails
+    when it runs with a standard user's credentials, and as SYSTEM it writes
+    SYSTEM's own HKCU. It works in an elevated session of the user's own
+    account. For standard users, deploy the ADMX template instead
+    (deployment/mdm/README.md). It uses the legacy AWS profile mode, which needs
+    Keyring credential storage, and has not been validated end to end.
+
     Intune deployment:
       Devices > Scripts and remediations > Platform scripts > Add (Windows 10+)
-      Run this script using the logged on credentials: YES (HKCU requires user context)
+      Run this script using the logged on credentials: Yes (as SYSTEM it would
+        write SYSTEM's own HKCU); it still fails for standard users, see above
       Run script in 64 bit PowerShell Host: Yes
 
     Omnissa Workspace ONE:

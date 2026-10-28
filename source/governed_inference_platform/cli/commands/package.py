@@ -1346,8 +1346,10 @@ class PackageCommand(Command):
         """Build the minimal OTEL Collector sidecar via OCB for all target platforms.
 
         Produces otelcol-{os}-{arch} binaries that are shipped IN the package, the same
-        model as credential-process and otel-helper. distribute.py, test.py, status.py and
-        the otel-helper.sh/.ps1 wrappers all expect these bundled binaries to exist.
+        model as credential-process and otel-helper. distribute.py, test.py and status.py
+        expect these bundled binaries to exist, and the installed otel-helper starts
+        ~/gip/otelcol on macOS/Linux (Go: cmd/otel-helper/collector.go) and Windows
+        (otel-helper.ps1).
 
         Network + Go 1.23+ are required on the PACKAGING (admin) machine only — end users
         never download the collector. Skips gracefully when Go is missing or too old.
@@ -4168,7 +4170,8 @@ if [ -f "collector-config.yaml" ] && [ -f "$OTELCOL_BINARY" ]; then
     # section below. otelcol resolves CloudWatch credentials through it via
     # credential_process. The separate profile is needed because a user's static
     # ~/.aws/credentials would otherwise shadow credential_process and cannot
-    # auto-refresh (see otel-helper.sh).
+    # auto-refresh. The installed otel-helper starts the collector with that
+    # profile when Claude Code first runs it (otelHeadersHelper).
 elif [ -f "collector-config.yaml" ] && [ ! -f "$OTELCOL_BINARY" ]; then
     echo
     echo "⚠️  Sidecar config present but collector binary '$OTELCOL_BINARY' is missing."
@@ -5578,6 +5581,15 @@ echo   OK AWS profiles configured
         if _ws_enabled and _ws_auth != "idc":
             install_all_flags.extend(("-WebSearchProfile", f'"{profile.name}"'))
         install_all_arguments = " ".join(install_all_flags)
+        # Known limitation: on Windows nothing starts otelcol.exe in the normal path
+        # (the Go otel-helper's collector launcher is a no-op there, and otel-helper.cmd
+        # reaches otel-helper.ps1, which starts it, only when otel-helper.exe fails).
+        windows_sidecar_warning = (
+            "echo WARNING: Known limitation on Windows: the sidecar collector is not started "
+            "automatically, so Claude Code usage does not reach CloudWatch. Ask your administrator."
+            if profile.monitoring_enabled and getattr(profile, "monitoring_mode", "central") == "sidecar"
+            else ""
+        )
         if _otel_missing_is_fatal:
             installer_content = installer_content.replace(
                 'powershell -NoProfile -ExecutionPolicy Bypass -File "%~dp0gip-install.ps1"',
@@ -5610,6 +5622,7 @@ if exist "%USERPROFILE%\\gip\\otelcol.exe" (
     powershell -NoProfile -Command "Get-ChildItem '%USERPROFILE%\\gip\\otelcol.exe' | Unblock-File" >nul 2>&1
     if !errorlevel! neq 0 exit /b 1
 )
+{windows_sidecar_warning}
 {windows_websearch_post_block}
 """
         )

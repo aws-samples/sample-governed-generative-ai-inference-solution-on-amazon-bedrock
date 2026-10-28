@@ -81,6 +81,32 @@ the generated AWS profile. LV-2 through LV-16 reproduced their expected
 positive or resolved-negative outcomes. Teardown is complete except for one
 EC2 Mac host under AWS's mandatory 24-hour allocation floor.
 
+## 2026-10-27 sidecar validation
+
+A sandbox replay of the sidecar-mode fixes ran on 2026-10-27. The account
+identifier is intentionally not published.
+
+- **`gip test` OTLP export check.** With the federated role's policy as it was
+  before the `AllowCloudWatchOtlpMetrics` statement existed, a SigV4-signed
+  empty export (`{"resourceMetrics":[]}`) to the CloudWatch OTLP endpoint
+  (`/v1/metrics`) returned HTTP 403 with `not authorized to perform:
+  cloudwatch:PutMetricData`. The empty export that the "OTLP Metrics Export"
+  check sends is therefore enough to detect a role that cannot export OTLP
+  metrics.
+- With the fixes, the sidecar collector started automatically as a single
+  instance, and Claude Code usage reached CloudWatch with no export errors.
+  Claude Desktop's short-term bearer token worked for an allowed model and was
+  denied for others, and Claude Desktop signed in starting from an empty
+  keychain. `gip test` passed all eight checks and left no `gip-test-*` profile
+  in the AWS config.
+- **2026-10-28 replay with `MonitoringMode`.** The auth stack deployed with
+  `MonitoringMode=sidecar` carried `AllowCloudWatchOtlpMetrics`; a fresh install
+  started one collector by itself with no export errors, the quota block
+  returned `ACCESS BLOCKED - QUOTA EXCEEDED` with no credentials, and
+  `--clear-cache` removed both the refresh token and the cached ID token, so the
+  next request asked for a new sign-in. `gip test` passed all eight checks while
+  the user's own collector was running.
+
 ---
 
 ## LV-1: AIP cost-allocation tag flow into Cost Explorer and CUR

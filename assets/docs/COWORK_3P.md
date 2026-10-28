@@ -206,8 +206,8 @@ No wrapper script is required — CoWork reuses the same `credential-process` bi
 ## Deployment
 
 > **Files from `gip package` or `gip cowork generate` contain a `__GIP_HOME__` placeholder** in the credential-helper path, because Claude Desktop does not expand `~` or environment variables (see the **Absolute paths** note later on this page). Pushing those files unchanged through an MDM tool points Claude Desktop at a path that doesn't exist. Use one of these instead:
-> - **Per user:** the installer (`install.sh` / `install.bat`) writes resolved copies to `~/gip/`. The user opens `~/gip/cowork-3p.mobileconfig` and approves it (macOS), or imports `~\gip\cowork-3p.reg` (Windows).
-> - **Intune:** `gip cowork generate --format ps1`, then deploy `Set-CoworkPolicy.ps1` as a platform script that runs as the signed-in user. It resolves the home directory at run time.
+> - **Per user:** the installer (`install.sh` / `install.bat`) writes resolved copies to `~/gip/`. The user opens `~/gip/cowork-3p.mobileconfig` and approves it (macOS), or imports `~\gip\cowork-3p.reg` (Windows). On Windows the import needs an elevated session of the user's own account: Windows lets standard users read `HKCU\SOFTWARE\Policies` but not write it, so a standard user's `reg import` fails with `ERROR: Error accessing the registry.`, and elevating with another account's credentials writes that other account's key. For a standard user, an administrator or your device-management tool writes the values into that user's hive (`HKEY_USERS\<user SID>\SOFTWARE\Policies\Claude`). Removing them needs the same rights.
+> - **Intune:** `gip cowork generate --format ps1` writes `Set-CoworkPolicy.ps1`, which resolves the home directory at run time. As generated, it does not work for standard users: with the logged-on user's credentials it can't write `HKCU\SOFTWARE\Policies\Claude`, and as SYSTEM it would write SYSTEM's own key and home directory. It has not been tested with Intune. For standard users, push the ADMX template in `deployment/mdm/` instead (see its README); it sets the AWS profile name, so it needs no home directory path. That is [AWS Profile Mode (Legacy)](#aws-profile-mode-legacy), which needs Keyring credential storage (see the boto3 caveat there), and this path has not been validated end to end.
 > - **Other MDM tools:** replace `__GIP_HOME__` with each user's absolute home directory before you push.
 >
 > The steps below describe building a profile by hand in the Claude Desktop setup UI, where you enter absolute paths yourself.
@@ -413,6 +413,8 @@ If users see an error at launch, verify:
 ## Monitoring
 
 When a monitoring stack is deployed, `gip cowork generate` automatically includes the `otlpEndpoint` in the generated MDM config, pointing Claude Cowork at the same OpenTelemetry collector used by Claude Code. No manual configuration is required.
+
+In sidecar mode the generated config points Claude Cowork at `http://localhost:4318`, which `otel-helper --proxy` serves on the user's device. The sidecar collector that Claude Code's `otel-helper` starts listens on the same port, so on a device that runs both, whichever starts first holds it. `otel-helper` does not start a collector while something already accepts connections on that address, and the proxy cannot bind while the collector holds it. With the collector on the port, Claude Cowork's OTLP logs are dropped, because the collector config has only a metrics pipeline. With the proxy on the port, Claude Code's metrics are signed and forwarded without the user attributes the collector adds from the request headers.
 
 Claude Cowork sends the following OTLP metrics to the collector:
 

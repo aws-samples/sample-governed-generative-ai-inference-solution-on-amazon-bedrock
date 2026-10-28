@@ -732,9 +732,13 @@ def generate_intune_script(output_dir: Path, mdm_config: dict) -> Path:
     HKCU\\SOFTWARE\\Policies\\Claude. Pre-populated with values from the
     current deployment profile.
 
-    Deploy via:
-    - Intune: Devices > Scripts > Platform scripts (Run as user)
-    - Omnissa: Devices > Profiles & Resources > Scripts (User context)
+    Windows grants standard users read-only access to HKCU\\SOFTWARE\\Policies,
+    so the script fails when it runs with a standard user's credentials, and as
+    SYSTEM it writes SYSTEM's own HKCU. It works in an elevated session of the
+    user's own account; for standard users, the ADMX template is the central
+    path (deployment/mdm/README.md). That template uses the legacy AWS profile
+    mode, which needs Keyring credential storage, and has not been validated
+    end to end.
 
     Returns the path to the generated .ps1 file.
     """
@@ -754,8 +758,16 @@ def generate_intune_script(output_dir: Path, mdm_config: dict) -> Path:
         "    Writes CoWork 3P registry values to HKCU\\SOFTWARE\\Policies\\Claude.",
         "    Claude Desktop reads these at launch as managed MDM policy.",
         "",
+        "    Standard users can read that key but not write it, so this script fails",
+        "    when it runs with a standard user's credentials, and as SYSTEM it writes",
+        "    SYSTEM's own HKCU. It works in an elevated session of the user's own",
+        "    account. For standard users, deploy the ADMX template instead",
+        "    (deployment/mdm/README.md). It uses the legacy AWS profile mode, which needs",
+        "    Keyring credential storage, and has not been validated end to end.",
+        "",
         "    Intune: Devices > Scripts and remediations > Platform scripts > Add",
-        "      Run this script using the logged on credentials: YES",
+        "      Run this script using the logged on credentials: Yes (as SYSTEM it would",
+        "        write SYSTEM's own HKCU); it still fails for standard users, see above",
         "      Run script in 64 bit PowerShell Host: Yes",
         "",
         ".NOTES",

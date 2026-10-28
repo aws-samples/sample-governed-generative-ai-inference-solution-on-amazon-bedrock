@@ -4,8 +4,9 @@
 """Test command - Verify authentication and access."""
 
 import json
+import os
 import subprocess
-import time
+import tempfile
 import uuid
 from pathlib import Path
 
@@ -18,8 +19,69 @@ from rich.panel import Panel
 from rich.progress import Progress, SpinnerColumn, TextColumn
 from rich.table import Table
 
-from governed_inference_platform.cli.utils.proc import popen_checked, run_checked
+from governed_inference_platform.cli.utils.proc import run_checked
 from governed_inference_platform.config import Config
+
+
+def _aws_config_path() -> Path:
+    """The file `aws configure set` writes: $AWS_CONFIG_FILE, else ~/.aws/config."""
+    configured = os.environ.get("AWS_CONFIG_FILE")
+    return Path(configured).expanduser() if configured else Path.home() / ".aws" / "config"
+
+
+def _without_profile_section(content: bytes, profile_name: str) -> bytes:
+    """Return content without the [profile <profile_name>] section, every other line as is."""
+    header = f"[profile {profile_name}]".encode()
+    kept, skipping = [], False
+    for line in content.splitlines(keepends=True):
+        stripped = line.strip()
+        if stripped == header:
+            skipping = True
+            continue
+        if skipping and stripped.startswith(b"["):
+            skipping = False
+        if not skipping:
+            kept.append(line)
+    return b"".join(kept)
+
+
+def _restore_aws_config(path: Path, profile_name: str, original: bytes | None) -> None:
+    """Remove a temporary profile that `gip test` added with `aws configure set`.
+
+    `aws configure set` may add a newline before the new section and, on the second
+    call, rewrites the file with the platform's line endings. When the file minus the
+    temporary section matches what was there before apart from those changes, the
+    original bytes are restored exactly. If something else changed the file meanwhile,
+    only the temporary section is removed, so that change is kept.
+    """
+    try:
+        current = path.read_bytes()
+    except FileNotFoundError:
+        return
+    remaining = _without_profile_section(current, profile_name)
+    if remaining == current:
+        return
+
+    def comparable(content: bytes) -> bytes:
+        return content.replace(b"\r\n", b"\n").rstrip(b"\n")
+
+    if original is None and not remaining.strip():
+        path.unlink()  # `aws configure set` created the file; remove it again
+        return
+    if original is not None and comparable(remaining) == comparable(original):
+        remaining = original
+    mode = path.stat().st_mode & 0o777
+    with tempfile.NamedTemporaryFile(dir=path.parent, prefix=".config.gip-test-", delete=False) as handle:
+        temporary = Path(handle.name)
+        handle.write(remaining)
+        handle.flush()
+        os.fsync(handle.fileno())
+    try:
+        os.chmod(temporary, mode)
+        os.replace(temporary, path)
+    except OSError:
+        temporary.unlink(missing_ok=True)
+        raise
 
 
 class TestCommand(Command):
@@ -41,7 +103,52 @@ class TestCommand(Command):
     ]
 
     def handle(self) -> int:
-        """Execute the test command."""
+        """Execute the test command.
+
+        The temporary [profile gip-test-*] sections the test adds to the AWS config are
+        removed when it ends: on success, on failure and on Ctrl-C.
+        """
+        self._temporary_profiles: list[tuple[str, Path, bytes | None]] = []
+        try:
+            return self._run_tests()
+        finally:
+            self._remove_temporary_profiles()
+
+    def _create_temporary_profile(self, test_profile: str, credential_command: str, region: str) -> bool:
+        """Add [profile <test_profile>] with `aws configure set`; handle() removes it again."""
+        config_path = _aws_config_path()
+        if config_path.is_symlink():
+            # `aws configure set` writes through the link. Snapshot and restore the target, so
+            # the link (for example into a dotfiles repository) survives and the section is
+            # removed from the file that actually received it.
+            config_path = config_path.resolve()
+        try:
+            original = config_path.read_bytes()
+        except OSError:
+            original = None
+        self._temporary_profiles.append((test_profile, config_path, original))
+        result = subprocess.run(  # nosec B603 — fixed argv (aws CLI), no shell
+            ["aws", "configure", "set", f"profile.{test_profile}.credential_process", credential_command],
+            capture_output=True,
+        )
+        subprocess.run(  # nosec B603 — fixed argv (aws CLI), no shell
+            ["aws", "configure", "set", f"profile.{test_profile}.region", region],
+            capture_output=True,
+        )
+        return result.returncode == 0
+
+    def _remove_temporary_profiles(self) -> None:
+        for test_profile, config_path, original in reversed(self._temporary_profiles):
+            try:
+                _restore_aws_config(config_path, test_profile, original)
+            except OSError as error:
+                Console().print(
+                    f"[yellow]Could not remove the temporary profile [profile {test_profile}] from "
+                    f"{config_path}: {error}. Remove that section by hand.[/yellow]"
+                )
+        self._temporary_profiles = []
+
+    def _run_tests(self) -> int:
         console = Console()
 
         # Load configuration to get active profile
@@ -242,14 +349,7 @@ class TestCommand(Command):
             # Quote the binary path so a space in it survives botocore's shell split
             # (shlex on POSIX); the profile name is validated to [A-Za-z0-9-] so needs none.
             credential_command = f'"{credential_binary}" --profile {test_profile_name}'
-            subprocess.run(  # nosec B603 — fixed argv (aws CLI), no shell
-                ["aws", "configure", "set", f"profile.{test_profile}.credential_process", credential_command],
-                capture_output=True,
-            )
-            subprocess.run(  # nosec B603 — fixed argv (aws CLI), no shell
-                ["aws", "configure", "set", f"profile.{test_profile}.region", profile.aws_region],
-                capture_output=True,
-            )
+            self._create_temporary_profile(test_profile, credential_command, profile.aws_region)
 
             return self._run_quota_tests(
                 profile,
@@ -286,26 +386,11 @@ class TestCommand(Command):
         # Quote the binary path so a space in it survives botocore's shell split
         # (shlex on POSIX); the profile name is validated to [A-Za-z0-9-] so needs none.
         credential_command = f'"{credential_binary}" --profile {test_profile_name}'
-        aws_config_result = subprocess.run(  # nosec B603 — fixed argv (aws CLI), no shell
-            ["aws", "configure", "set", f"profile.{test_profile}.credential_process", credential_command],
-            capture_output=True,
-        )
-
-        if aws_config_result.returncode != 0:
+        if not self._create_temporary_profile(
+            test_profile, credential_command, profile_config.get("aws_region", "us-east-1")
+        ):
             console.print("[red]Failed to configure test profile[/red]")
             return 1
-
-        # Configure region for the test profile
-        subprocess.run(  # nosec B603 — fixed argv (aws CLI), no shell
-            [
-                "aws",
-                "configure",
-                "set",
-                f"profile.{test_profile}.region",
-                profile_config.get("aws_region", "us-east-1"),
-            ],
-            capture_output=True,
-        )
 
         # Load configuration for test parameters
         profile = config.get_profile(test_profile_name)
@@ -426,6 +511,16 @@ class TestCommand(Command):
                     test_results.append(("Local Collector", result["status"], result["details"]))
                     progress.update(task, completed=True)
 
+                    # Test 8: the federated role can export what the collector sends.
+                    task = progress.add_task("Testing OTLP metrics export...", total=None)
+                    result = self._test_otlp_metrics_export(
+                        aws_profile,
+                        profile.aws_region or "us-east-1",
+                        getattr(profile, "effective_auth_type", getattr(profile, "auth_type", "oidc")),
+                    )
+                    test_results.append(("OTLP Metrics Export", result["status"], result["details"]))
+                    progress.update(task, completed=True)
+
         # Display results
         console.print("\n")
         for test_name, status, details in test_results:
@@ -497,13 +592,6 @@ class TestCommand(Command):
                 )
 
             console.print("\n[bold]Package test complete. Authentication and Bedrock access verified.[/bold]")
-
-            # Clean up test profile if we created one
-            if "test_profile" in locals():
-                subprocess.run(  # nosec B603 — fixed argv (aws CLI), no shell
-                    ["aws", "configure", "--profile", test_profile, "set", "credential_process", ""],
-                    capture_output=True,
-                )
 
             return 0
 
@@ -808,22 +896,104 @@ class TestCommand(Command):
         if not config.exists():
             return {"status": "✗", "details": "collector-config.yaml not found in package"}
 
-        # Try starting the collector briefly to verify it's functional
+        # Check the binary runs and contains every component the config uses. `otelcol components`
+        # binds no port and needs no credentials, so this works while the user's sidecar is
+        # already listening on localhost:4318 (the Go otel-helper starts it on first use) and
+        # before credentials exist. Starting a second collector here failed with "address
+        # already in use", or on the sigv4auth credential lookup, and was reported as a broken
+        # binary.
         try:
-            proc = popen_checked(  # nosec B603 — list argv, no shell
-                [str(binary), "--config", str(config)],
-                stdout=subprocess.PIPE,
-                stderr=subprocess.PIPE,
+            result = run_checked(  # nosec B603 — list argv, no shell
+                [str(binary), "components"],
+                capture_output=True,
+                text=True,
+                timeout=20,
             )
-            time.sleep(2)
-            if proc.poll() is not None:
-                stderr = proc.stderr.read().decode()[:100]
-                return {"status": "✗", "details": f"Collector exited immediately: {stderr}"}
-            proc.terminate()
-            proc.wait(timeout=5)
-            return {"status": "✓", "details": f"Collector binary OK ({binary.name})"}
         except Exception as e:
-            return {"status": "✗", "details": str(e)[:80]}
+            return {"status": "✗", "details": f"Collector binary did not run: {str(e)[:80]}"}
+        if result.returncode != 0:
+            return {"status": "✗", "details": f"Collector binary failed: {(result.stderr or '')[:100]}"}
+        missing = self._collector_components_missing(result.stdout or "", config)
+        if missing is None:
+            return {"status": "✗", "details": "Could not read the collector's component list or config"}
+        if missing:
+            return {"status": "✗", "details": f"Collector lacks components the config uses: {', '.join(missing)}"}
+        return {"status": "✓", "details": f"Collector binary OK ({binary.name}), config components present"}
+
+    @staticmethod
+    def _collector_components_missing(components_output: str, config_path: Path) -> list[str] | None:
+        """Return the config's components that the binary doesn't have, or None if unparseable."""
+        import yaml
+
+        kinds = ("receivers", "processors", "exporters", "extensions")
+        try:
+            available = yaml.safe_load(components_output) or {}
+            config = yaml.safe_load(config_path.read_text(encoding="utf-8")) or {}
+        except (yaml.YAMLError, OSError, UnicodeDecodeError):
+            return None
+        if not isinstance(available, dict) or not isinstance(config, dict):
+            return None
+        missing = []
+        for kind in kinds:
+            have = {item.get("name") for item in (available.get(kind) or []) if isinstance(item, dict)}
+            for component_id in config.get(kind) or {}:
+                component_type = str(component_id).split("/", 1)[0]
+                if component_type not in have:
+                    missing.append(f"{kind[:-1]} {component_type}")
+        return missing
+
+    def _test_otlp_metrics_export(self, profile_name: str, region: str, auth_type: str = "oidc") -> dict:
+        """Check that the federated credentials can export OTLP metrics, as the collector does.
+
+        The sidecar collector sends OTLP to the CloudWatch OTLP endpoint, SigV4-signed for the
+        "monitoring" service with the user's federated credentials. This sends an empty export
+        ({"resourceMetrics":[]}) the same way, so it records no data. A 403 means the role's IAM
+        policy does not allow cloudwatch:PutMetricData for OTLP ingest; the collector then
+        drops every batch and usage never reaches CloudWatch.
+        """
+        from botocore.auth import SigV4Auth
+        from botocore.awsrequest import AWSRequest
+        from botocore.httpsession import URLLib3Session
+
+        url = f"https://monitoring.{region}.amazonaws.com/v1/metrics"
+        try:
+            # An explicit profile keeps static AWS_* environment credentials out of the check.
+            credentials = boto3.Session(profile_name=profile_name).get_credentials()
+            if credentials is None:
+                return {"status": "✗", "details": f"No credentials for profile {profile_name}"}
+            request = AWSRequest(
+                method="POST",
+                url=url,
+                data=b'{"resourceMetrics":[]}',
+                headers={"Content-Type": "application/json"},
+            )
+            SigV4Auth(credentials.get_frozen_credentials(), "monitoring", region).add_auth(request)
+            response = URLLib3Session(timeout=15).send(request.prepare())
+        except Exception as e:
+            return {"status": "!", "details": f"Could not send a test export to {url}: {str(e)[:80]}"}
+
+        status = response.status_code
+        if 200 <= status < 300:
+            return {"status": "✓", "details": f"Role can export OTLP metrics to CloudWatch (HTTP {status})"}
+        message = " ".join(response.text.split())[:160]
+        if status == 403:
+            if auth_type == "idc":
+                remedy = (
+                    "Add the AllowCloudWatchOtlpMetrics statement to the IAM Identity Center permission set "
+                    "(assets/docs/providers/iam-identity-center-setup.md, Sidecar telemetry and Claude Desktop)."
+                )
+            else:
+                remedy = "Redeploy the auth stack with MonitoringMode=sidecar (`gip deploy auth` sets it)."
+            return {
+                "status": "✗",
+                "details": (
+                    "HTTP 403: the role's IAM policy does not allow OTLP metrics "
+                    f"(cloudwatch:PutMetricData); usage will not reach CloudWatch. {remedy} {message}"
+                ),
+            }
+        if status == 401:
+            return {"status": "✗", "details": f"HTTP 401: CloudWatch rejected the credentials. {message}"}
+        return {"status": "!", "details": f"Unexpected HTTP {status} from {url}. {message}"}
 
     def _get_package_profile_name(self, package_dir: Path) -> str | None:
         """Get the profile name from the package's config.json."""

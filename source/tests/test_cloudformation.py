@@ -692,8 +692,8 @@ class TestEndUserPutMetricDataNamespaceScoped:
     def test_identity_pool_otlp_grant_is_namespace_scoped(self):
         template = load_infra_template("cognito-identity-pool.yaml")
         statements = template["Resources"]["BedrockAccessPolicy"]["Properties"]["PolicyDocument"]["Statement"]
-        otlp = [s for s in _find_statements(statements) if s.get("Sid") == "AllowCloudWatchOTLP"]
-        assert len(otlp) == 1, "expected exactly one AllowCloudWatchOTLP statement"
+        otlp = [s for s in _find_statements(statements) if s.get("Sid") == "AllowCloudWatchMetrics"]
+        assert len(otlp) == 1, "expected exactly one namespace-scoped AllowCloudWatchMetrics statement"
         string_equals = otlp[0]["Condition"]["StringEquals"]
         assert string_equals.get("cloudwatch:namespace") == USAGE_NAMESPACES
         # The pre-existing region pin must survive the namespace addition
@@ -709,14 +709,28 @@ class TestEndUserPutMetricDataNamespaceScoped:
         return policy_list[0]["PolicyDocument"]["Statement"]
 
     def test_idc_put_metric_data_is_namespace_scoped(self):
-        statements = self.get_idc_statements()
+        """Classic PutMetricData stays scoped to the usage namespaces. The one other
+        PutMetricData statement allows only namespace-less (OTLP) writes to the
+        account's OTLP dataset (see test_otlp_and_bearer_policy.py)."""
+        statements = []
+        for item in self.get_idc_statements():
+            # The OTLP statement sits under !If [SidecarOtlpIngest, <statement>, AWS::NoValue].
+            if isinstance(item, dict) and "Fn::If" in item and item["Fn::If"][0] == "SidecarOtlpIngest":
+                statements.append(item["Fn::If"][1])
+            elif isinstance(item, dict):
+                statements.append(item)
         writes = [s for s in statements if "cloudwatch:PutMetricData" in s.get("Action", [])]
-        assert len(writes) == 1, "expected exactly one PutMetricData statement"
-        write = writes[0]
-        assert write["Action"] == ["cloudwatch:PutMetricData"], (
-            "PutMetricData must not share a statement with unconditioned actions"
-        )
-        assert write["Condition"]["StringEquals"]["cloudwatch:namespace"] == USAGE_NAMESPACES
+        assert len(writes) == 2, "expected the namespace-scoped and the OTLP-dataset statements"
+        for write in writes:
+            assert write["Action"] == ["cloudwatch:PutMetricData"], (
+                "PutMetricData must not share a statement with unconditioned actions"
+            )
+        classic = [w for w in writes if w.get("Resource") == "*"]
+        otlp = [w for w in writes if w.get("Resource") != "*"]
+        assert len(classic) == 1 and len(otlp) == 1
+        assert classic[0]["Condition"]["StringEquals"]["cloudwatch:namespace"] == USAGE_NAMESPACES
+        assert otlp[0]["Condition"] == {"Null": {"cloudwatch:namespace": "true"}}
+        assert ":dataset/default" in str(otlp[0]["Resource"])
 
     def test_idc_read_actions_remain_available(self):
         """ListMetrics/GetMetricStatistics must keep working (ListMetrics without

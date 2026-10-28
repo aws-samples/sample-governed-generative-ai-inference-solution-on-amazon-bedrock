@@ -114,6 +114,16 @@ def _extract_azure_tenant_id(domain: str) -> str:
     return match.group(0) if match else domain
 
 
+def _monitoring_mode_param(profile) -> str:
+    """Value for the auth templates' MonitoringMode parameter.
+
+    Only sidecar mode gets the direct OTLP dataset write (AllowCloudWatchOtlpMetrics): the local
+    collector needs it, while central mode exports through the ALB collector, so granting it there
+    would let users post telemetry around the JWT-validated path.
+    """
+    return "sidecar" if getattr(profile, "monitoring_mode", "central") == "sidecar" else "central"
+
+
 class OidcThumbprintLookupError(CloudFormationError):
     """Raised when the current IAM OIDC provider thumbprints of an existing auth stack cannot be read."""
 
@@ -1473,6 +1483,7 @@ class DeployCommand(Command):
                         f"AllowedBedrockRegions={','.join(bedrock_regions)}",
                         f"RestrictToAnthropicModels={str(getattr(profile, 'restrict_to_anthropic_models', True)).lower()}",
                         f"EnableMonitoring={str(profile.monitoring_enabled).lower()}",
+                        f"MonitoringMode={_monitoring_mode_param(profile)}",
                     ]
                     return deploy_with_cf(
                         template,
@@ -1617,6 +1628,7 @@ class DeployCommand(Command):
                         f"IdentityPoolName={profile.identity_pool_name}",
                         f"AllowedBedrockRegions={','.join(bedrock_regions)}",
                         f"EnableMonitoring={str(profile.monitoring_enabled).lower()}",
+                        f"MonitoringMode={_monitoring_mode_param(profile)}",
                     ]
                 )
 
@@ -2695,6 +2707,7 @@ class DeployCommand(Command):
                     f"AllowedBedrockRegions={','.join(bedrock_regions)}",
                     f"RestrictToAnthropicModels={str(getattr(profile, 'restrict_to_anthropic_models', True)).lower()}",
                     f"EnableMonitoring={str(profile.monitoring_enabled).lower()}",
+                    f"MonitoringMode={_monitoring_mode_param(profile)}",
                 ]
                 print_deploy_cmd(template, stack_name, params, ["CAPABILITY_NAMED_IAM"])
             else:
@@ -2739,6 +2752,7 @@ class DeployCommand(Command):
                         f"IdentityPoolName={profile.identity_pool_name}",
                         f"AllowedBedrockRegions={','.join(bedrock_regions)}",
                         f"EnableMonitoring={str(profile.monitoring_enabled).lower()}",
+                        f"MonitoringMode={_monitoring_mode_param(profile)}",
                     ]
                 )
                 print_deploy_cmd(template, stack_name, params, ["CAPABILITY_NAMED_IAM"])
@@ -2943,10 +2957,17 @@ class DeployCommand(Command):
                 profile.federated_role_arn = direct_sts_role
                 config.save_profile(profile)
 
-        # Get networking outputs if enabled
+        # Get networking outputs if enabled. Sidecar monitoring deploys no
+        # networking (unless distribution needs it) and no collector stack, so
+        # don't query stacks that were never deployed.
         if profile.monitoring_enabled:
+            central_monitoring = getattr(profile, "monitoring_mode", "central") == "central"
             networking_stack = profile.stack_names.get("networking", f"{profile.identity_pool_name}-networking")
-            networking_outputs = get_stack_outputs(networking_stack, profile.aws_region)
+            networking_outputs = (
+                get_stack_outputs(networking_stack, profile.aws_region)
+                if central_monitoring or getattr(profile, "enable_distribution", False)
+                else {}
+            )
 
             if networking_outputs:
                 console.print("\n[bold]Networking Stack:[/bold]")
@@ -2957,7 +2978,7 @@ class DeployCommand(Command):
 
             # Get monitoring stack endpoint
             monitoring_stack = profile.stack_names.get("monitoring", f"{profile.identity_pool_name}-otel-collector")
-            monitoring_outputs = get_stack_outputs(monitoring_stack, profile.aws_region)
+            monitoring_outputs = get_stack_outputs(monitoring_stack, profile.aws_region) if central_monitoring else {}
 
             if monitoring_outputs:
                 console.print("\n[bold]Monitoring Stack:[/bold]")

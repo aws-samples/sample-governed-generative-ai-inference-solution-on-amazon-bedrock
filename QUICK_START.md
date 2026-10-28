@@ -124,6 +124,7 @@ The wizard collects:
 - Optional monitoring setup:
   - Enable monitoring? (yes/no)
   - Monitoring mode: **central collector** (ECS Fargate) or **sidecar collector** (local). Sidecar mode skips VPC configuration and Athena SQL pipeline setup (PromQL dashboards are included in both modes).
+    - **Known limitation (Windows, sidecar mode):** the sidecar collector does not start on Windows in the normal path. Claude Code runs `otel-helper.cmd`, which runs `otel-helper.exe`; only `otel-helper.ps1` starts `otelcol.exe`, and `otel-helper.cmd` falls back to it only when the `.exe` fails. Claude Code usage from Windows devices therefore does not reach CloudWatch, and `install.bat` prints a warning in sidecar mode. macOS and Linux are not affected. Use central mode where Windows usage must be counted.
   - VPC configuration (central collector only)
 
 ---
@@ -518,13 +519,13 @@ When **Yes**, every `gip package` run also writes Claude Desktop (Claude Cowork)
 
 Files in the package (`dist/<profile>/<timestamp>/`):
 - `cowork-3p.mobileconfig` (macOS)
-- `cowork-3p.reg` (Windows). Writes to `HKCU\SOFTWARE\Policies\Claude` (per-user, no admin elevation); do not redirect to `HKLM`.
+- `cowork-3p.reg` (Windows). Writes to `HKCU\SOFTWARE\Policies\Claude`, the user's own policy key; do not redirect to `HKLM`. Windows lets standard users read this key but not write it, so importing these values, and removing them later, needs an elevated session of the user's own account (see below).
 - `cowork-3p-config.json`: raw MDM JSON for the Claude Desktop Setup UI or manual review
 
 By default Claude Desktop authenticates through the `inferenceCredentialHelper` key, which runs `credential-process --desktop` at an **absolute** path. Claude Desktop does not expand `~` or environment variables in these values, so the packaged files carry a `__GIP_HOME__` placeholder instead of a real home directory. **Don't push the packaged files as they are.** Use one of these paths:
 
-- **Per user (macOS and Windows):** the user runs the installer (`install.sh` or `install.bat`) **before** opening Claude Desktop. The installer writes copies with the user's real home directory to `~/gip/` (`cowork-3p.mobileconfig` and `cowork-3p-config.json` on macOS and Linux, `cowork-3p.reg` on Windows). On macOS the user opens `~/gip/cowork-3p.mobileconfig` and approves the profile in **System Settings → Privacy & Security → Profiles**. Unsigned profiles cannot auto-install. On Windows the user imports `~\gip\cowork-3p.reg`.
-- **Central (Windows / Intune):** run `gip cowork generate --format ps1` and deploy `Set-CoworkPolicy.ps1` as an Intune platform script that runs as the signed-in user. It fills in each user's home directory at run time.
+- **Per user (macOS and Windows):** the user runs the installer (`install.sh` or `install.bat`) **before** opening Claude Desktop. The installer writes copies with the user's real home directory to `~/gip/` (`cowork-3p.mobileconfig` and `cowork-3p-config.json` on macOS and Linux, `cowork-3p.reg` on Windows). On macOS the user opens `~/gip/cowork-3p.mobileconfig` and approves the profile in **System Settings** (on current macOS: **General → Device Management**). Unsigned profiles cannot auto-install. On Windows, a user who is a local administrator imports `~\gip\cowork-3p.reg` from an elevated session of their own account, for example `reg import "%USERPROFILE%\gip\cowork-3p.reg"` in a terminal opened with **Run as administrator**. A standard user's import fails with `ERROR: Error accessing the registry.`, and elevating with another account's credentials writes that other account's key. For a standard user, an administrator or your device-management tool writes the values into that user's hive (`HKEY_USERS\<user SID>\SOFTWARE\Policies\Claude`); the user can't remove them afterwards either.
+- **Central (Windows / Intune):** `gip cowork generate --format ps1` writes `Set-CoworkPolicy.ps1`, which fills in each user's home directory at run time. As generated, it does not work for standard users: run with the logged-on user's credentials, it can't write `HKCU\SOFTWARE\Policies\Claude` (the same restriction as the `.reg` import); run as SYSTEM, it would write SYSTEM's own key and home directory. It has not been tested with Intune. For standard users, push the settings with the ADMX template in `deployment/mdm/` instead (see its README); it sets the AWS profile name, so it needs no home directory path. That is the legacy AWS profile mode, which needs Keyring credential storage (see the boto3 caveat in [COWORK_3P.md](assets/docs/COWORK_3P.md#aws-profile-mode-legacy)), and this path has not been validated end to end.
 - **Central (any other MDM tool):** replace `__GIP_HOME__` with each user's absolute home directory before you push the file.
 
 Users still run the installer on every machine, because it installs the `credential-process` binary that these settings point at.

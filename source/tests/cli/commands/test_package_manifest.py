@@ -693,6 +693,24 @@ def test_standard_installer_rejects_sudo_before_writes(tmp_path):
     assert not (home / "gip").exists()
 
 
+@pytest.mark.parametrize(
+    ("make_profile", "warned"),
+    [(_make_oidc_sidecar_profile, True), (_make_oidc_central_profile, False)],
+)
+def test_windows_installer_warns_that_the_sidecar_collector_does_not_start(tmp_path, make_profile, warned):
+    """Regression (review, 2026-10-27): on Windows nothing starts otelcol.exe in the normal path
+    (otel-helper.cmd reaches the .ps1 launcher only when otel-helper.exe fails), so usage never
+    reaches CloudWatch. Until a Windows launcher ships, install.bat says so in sidecar mode."""
+    installer = PackageCommand()._create_windows_installer(tmp_path, make_profile()).read_text(encoding="utf-8")
+
+    warning = [line for line in installer.splitlines() if "sidecar collector is not started automatically" in line]
+    assert len(warning) == (1 if warned else 0)
+    if warned:
+        assert warning[0].startswith("echo WARNING:")
+        assert not set(warning[0]) & set("()!&|<>%^"), "batch metacharacters in an echo line"
+        assert installer.index(warning[0]) < installer.index("echo Installation complete")
+
+
 def test_windows_manifest_is_recorded_before_success_prompt(tmp_path):
     installer = (
         PackageCommand()._create_windows_installer(tmp_path, _make_oidc_central_profile()).read_text(encoding="utf-8")

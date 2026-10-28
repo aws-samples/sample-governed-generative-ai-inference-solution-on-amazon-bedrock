@@ -140,7 +140,10 @@ func ReadMonitoringTokenFromKeyring(profile string) (*MonitoringTokenData, error
 	if err != nil {
 		return nil, err
 	}
+	return readMonitoringTokenFromKeyringImpl(kr, profile)
+}
 
+func readMonitoringTokenFromKeyringImpl(kr keyringRW, profile string) (*MonitoringTokenData, error) {
 	item, err := kr.Get(profile + "-monitoring")
 	if err != nil {
 		return nil, err

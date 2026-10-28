@@ -19,6 +19,7 @@ Metadata:
           default: "Monitoring"
         Parameters:
           - EnableMonitoring
+          - MonitoringMode
     ParameterLabels:
       FederatedRoleName:
         default: "Federated IAM role name"
@@ -32,6 +33,8 @@ Metadata:
         default: "Restrict to Anthropic models only"
       EnableMonitoring:
         default: "Enable monitoring and logging"
+      MonitoringMode:
+        default: "Monitoring mode (sidecar grants direct OTLP writes)"
 
 Parameters:
   FederatedRoleName:
@@ -75,8 +78,21 @@ Parameters:
     AllowedValues: ['true', 'false']
     Description: Enable monitoring and logging capabilities
 
+  MonitoringMode:
+    Type: String
+    Default: 'central'
+    AllowedValues:
+      - 'central'
+      - 'sidecar'
+    Description: >-
+      Monitoring mode. Only 'sidecar' grants direct OTLP metric writes, which the local collector
+      needs; central mode exports through the ALB collector and does not need them.
+
 Conditions:
   MonitoringEnabled: !Equals [!Ref EnableMonitoring, 'true']
+  SidecarOtlpIngest: !And
+    - !Condition MonitoringEnabled
+    - !Equals [!Ref MonitoringMode, 'sidecar']
   AnthropicModelsOnly: !Equals [!Ref RestrictToAnthropicModels, 'true']
 
 Resources:
@@ -124,6 +140,21 @@ Resources:
             Condition:
               StringEquals:
                 'aws:RequestedRegion': !Ref AllowedBedrockRegions
+          # Claude Desktop's credential helper returns a short-term Amazon Bedrock API key
+          # (a presigned CallWithBearerToken URL signed with these credentials). The action
+          # has no resource type, so it is scoped by Region and token type instead.
+          # IDC credential-process returns the permission set's role credentials and does not
+          # assume BedrockIDCRole, so this applies only to something that assumes that role or
+          # attaches this managed policy. The permission set needs the statement itself (see
+          # assets/docs/providers/iam-identity-center-setup.md).
+          - Sid: AllowBedrockShortTermBearerToken
+            Effect: Allow
+            Action: 'bedrock:CallWithBearerToken'
+            Resource: '*'
+            Condition:
+              StringEquals:
+                'aws:RequestedRegion': !Ref AllowedBedrockRegions
+                'bedrock:BearerTokenType': 'SHORT_TERM'
           - Sid: AllowBedrockModelInfo
             Effect: Allow
             Action:
@@ -192,6 +223,22 @@ Resources:
                       'cloudwatch:namespace':
                         - 'GIP/Bedrock/Usage'
                         - 'AWS/Bedrock'
+                # OTLP ingest (sidecar collector) carries no cloudwatch:namespace and is
+                # authorized against the account's OTLP dataset; allow only that.
+                # Applies only if something assumes BedrockIDCRole: the IDC sidecar collector
+                # signs with the permission set's role credentials, so the permission set needs
+                # this statement itself (see assets/docs/providers/iam-identity-center-setup.md).
+                - !If
+                  - SidecarOtlpIngest
+                  - Sid: AllowCloudWatchOtlpMetrics
+                    Effect: Allow
+                    Action:
+                      - 'cloudwatch:PutMetricData'
+                    Resource: !Sub 'arn:${AWS::Partition}:cloudwatch:*:${AWS::AccountId}:dataset/default'
+                    Condition:
+                      'Null':
+                        'cloudwatch:namespace': 'true'
+                  - !Ref 'AWS::NoValue'
                 # Read-only metric queries; these APIs are not resource-scoped
                 # and ListMetrics without a Namespace filter must keep working.
                 - Sid: AllowCloudWatchRead
