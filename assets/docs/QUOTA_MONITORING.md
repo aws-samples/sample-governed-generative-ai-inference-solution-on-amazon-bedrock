@@ -785,11 +785,11 @@ With silent refresh enabled (default since June 2026), the credential-process au
 11:00 - Quota check BLOCKS access (user exceeded limit)
 ```
 
-The enforcement gap equals the STS session duration (typically 1 hour), regardless of refresh_token lifetime.
+The enforcement gap equals the STS session duration that the client requested, regardless of refresh_token lifetime.
 
 #### Recommendation for Tight Enforcement
 
-Reduce `max_session_duration` when blocking is enabled:
+Reduce `max_session_duration` when blocking is enabled. This sets the duration that credential-process requests; the federated role's `MaxSessionDuration` stays at 12 hours, so a modified client can still request 12 hours:
 
 | Session Duration | Enforcement Gap | Use Case |
 |------------------|-----------------|----------|
@@ -926,7 +926,9 @@ the cost of more frequent S3 writes:
 gip deploy analytics --parameters FirehoseBufferInterval=60
 ```
 
-## Server-Side Metering (Tamper-Resistant Counts) {#server-side-metering-tamper-proof-usage}
+<a id="server-side-metering-tamper-proof-usage"></a>
+
+## Server-Side Metering (Tamper-Resistant Counts)
 
 Client telemetry can be suppressed (stop the sidecar, edit the exporter).
 Server-side metering adds a second, service-generated count source: **Amazon
@@ -949,6 +951,13 @@ Per allowed Bedrock region, an optional stack (`quota-metering.yaml`) deploys:
    verifies that Bedrock's text, image, embedding, video, and audio data-delivery
    flags are all disabled. A content-bearing configuration is rejected without
    modification; a metadata-only configuration is preserved unchanged.
+   `gip deploy metering` doesn't pass `AdoptExistingConfig` yet, so adoption
+   currently needs a hand-run CloudFormation deploy of the packaged template; a
+   later `gip deploy metering` against an adopted configuration is untested. If
+   your existing configuration delivers prompt or response content, run the
+   sample in a dedicated inference account, or skip server-side metering and use
+   CUR 2.0 IAM-principal cost allocation for per-user cost after the fact
+   ([COST_ATTRIBUTION.md](COST_ATTRIBUTION.md)).
 2. A CloudWatch **log group** (30-day retention) + **subscription filter**.
 3. A **processor Lambda** that maps `identity.arn` → email (assumed-role
    session name, same parse as the quota API), prices tokens with the shared

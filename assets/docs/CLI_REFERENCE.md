@@ -81,7 +81,7 @@ poetry run gip init [options]
 **Options:**
 
 - `--profile <name>` - Configuration profile name (optional, will prompt if not specified)
-- `--managed` - Deploy settings to OS-level managed-settings.json (highest precedence, non-overridable by users)
+- `--managed` - Deploy settings to OS-level managed-settings.json (highest precedence: user and project settings can't override it; binds Claude Code only, and local administrators can still edit the file)
 - `--from-file <answers.(yaml|json)>` - Create a profile non-interactively from an answers file (see [Non-interactive / GitOps mode](#non-interactive-gitops-mode))
 - `--export-answers <path>` - Export an existing profile back to an answers file (YAML or JSON, chosen by extension)
 - `--profile-name <name>` - Profile name to create with `--from-file` or export with `--export-answers` (default: `default`)
@@ -455,7 +455,9 @@ PyInstaller is a runtime bundler, not a cross-OS compiler. It emits binaries in 
   - Requires CodeBuild to be enabled during `init`
   - Will be skipped if CodeBuild is not enabled
 
-#### Cross-arch macOS Build Setup (legacy mode only, optional) {#cross-arch-macos-build-setup-optional}
+<a id="cross-arch-macos-build-setup-optional"></a>
+
+#### Cross-arch macOS Build Setup (legacy mode only, optional)
 
 By default, legacy-mode `gip package` builds a binary for your Mac's own architecture. The Intel (`macos-intel`) binary covers all Mac users — it runs natively on Intel Macs and via Rosetta on Apple Silicon — so an Apple Silicon admin who needs to support Intel Mac users should build the Intel binary using this setup.
 

@@ -150,7 +150,7 @@ class InitCommand(Command):
         option(
             "managed",
             None,
-            description="Deploy settings to OS-level managed-settings.json (highest precedence, non-overridable)",
+            description="Deploy settings to OS-level managed-settings.json (highest precedence; user settings can't override it)",
             flag=True,
         ),
         option(
@@ -1910,7 +1910,9 @@ class InitCommand(Command):
         console.print("\n[bold]Settings Deployment Target[/bold]")
         console.print("Choose where Claude Code settings are installed on user machines:")
         console.print("  • User scope: ~/.claude/settings.json (users can override)")
-        console.print("  • Managed (org enforcement): OS-level path (highest precedence, non-overridable)")
+        console.print(
+            "  • Managed (org enforcement): OS-level path (highest precedence; user settings can't override it)"
+        )
 
         saved_target = config.get("settings_target", "user")
         # --managed flag overrides the wizard default
@@ -1936,14 +1938,14 @@ class InitCommand(Command):
             console.print()
             saved_lock = config.get("lock_default_model", False)
             lock_model = questionary.confirm(
-                "Lock default model for all users? (Prevents users from changing model via /model)",
+                "Set the default model for all users in managed settings? (A default, not a lock; IAM limits which models they can use)",
                 default=saved_lock,
             ).ask()
             config["lock_default_model"] = lock_model if lock_model is not None else False
             if not config["lock_default_model"]:
                 console.print("[green]✓[/green] Users can freely select models via /model (CRIS routing still applied)")
             else:
-                console.print("[yellow]![/yellow] Default model will be enforced for all users via managed-settings")
+                console.print("[yellow]![/yellow] Default model will be set for all users via managed-settings")
         else:
             console.print("[green]✓[/green] Settings will be deployed to user-scope path")
 

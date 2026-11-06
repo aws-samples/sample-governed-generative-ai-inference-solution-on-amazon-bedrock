@@ -4105,7 +4105,7 @@ if [ -d "gip-settings" ]; then
             echo "WARNING: Some path placeholders were not replaced in managed-settings.json"
         else
             echo "OK Managed settings installed: $MANAGED_DIR/managed-settings.json"
-            echo "   These settings have highest precedence and cannot be overridden by users."
+            echo "   These settings have highest precedence; user settings can't override them."
         fi
     fi
 
@@ -5523,7 +5523,7 @@ if exist "gip-settings" (
             exit /b 1
         )
         echo OK Managed settings installed: C:\\Program Files\\ClaudeCode\\managed-settings.json
-        echo    These settings have highest precedence and cannot be overridden by users.
+        echo    These settings have highest precedence; user settings can't override them.
     )
 
     REM Copy user-scope settings.json only when absent or manifest-owned.

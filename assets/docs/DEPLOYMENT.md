@@ -215,14 +215,14 @@ The default Go path builds Windows binaries locally and does not require CodeBui
 
 ### Organization-Wide Enforcement (Optional)
 
-For large deployments (50+ users) where settings must be non-overridable, use managed settings:
+For large deployments (50+ users) where user settings must not override yours, use managed settings:
 
 ```bash
 poetry run gip init --managed
 poetry run gip package
 ```
 
-This writes settings to the OS-level `managed-settings.json` path instead of user-scope `~/.claude/settings.json`. Managed settings have the **highest precedence** in Claude Code's settings hierarchy and cannot be edited or overridden by end users.
+This writes settings to the OS-level `managed-settings.json` path instead of user-scope `~/.claude/settings.json`. Managed settings have the **highest precedence** in Claude Code's settings hierarchy, so user and project settings can't override them. They bind Claude Code only, and a user with local administrator rights can still edit the file (on WSL, `/etc/claude-code` is user-writable), so IAM stays the enforcement boundary for models and Regions ([Anthropic: managed settings](https://code.claude.com/docs/en/managed-settings)).
 
 | OS | Managed path | Requires |
 |---|---|---|
@@ -230,7 +230,7 @@ This writes settings to the OS-level `managed-settings.json` path instead of use
 | Linux/WSL | `/etc/claude-code/managed-settings.json` | `sudo` |
 | Windows | `C:\Program Files\ClaudeCode\managed-settings.json` | Administrator |
 
-The installer will detect managed settings in the package and prompt for elevated privileges. For MDM-managed fleets (Jamf, Intune, Group Policy), see Anthropic's [MDM templates](https://github.com/anthropics/claude-code/tree/main/examples/mdm) for alternative delivery.
+The installer will detect managed settings in the package and prompt for elevated privileges. It stops if a `managed-settings.json` that it didn't write already exists; on fleets that already push managed settings, merge the sample's keys into your existing policy instead. For MDM-managed fleets (Jamf, Intune, Group Policy), see Anthropic's [MDM templates](https://github.com/anthropics/claude-code/tree/main/examples/mdm) for alternative delivery.
 
 ## Phase 4: Testing Your Deployment
 
