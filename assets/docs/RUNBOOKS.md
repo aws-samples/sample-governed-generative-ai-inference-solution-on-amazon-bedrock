@@ -682,7 +682,7 @@ several data stores retain the user's email after departure.
 | 1 | Deactivate the user in the IdP (Okta/Entra/Federate) | you do this — everything below keys off it |
 | 2 | OIDC refresh stops: the IdP returns `invalid_grant`, the client discards the stored refresh token and the interactive browser flow also fails (`source/go/internal/oidc/token.go:RefreshTokenExchange`) | immediate (direct-IdP profiles) |
 | 3 | **Cognito user-pool caveat**: Cognito issues its *own* refresh token (valid 600 minutes = 10 h, `cognito-user-pool-setup.yaml` `UserPoolClient.RefreshTokenValidity`) and does not re-check the upstream IdP on refresh. Explicitly revoke: | up to 10 h unless revoked |
-| 4 | Live STS sessions keep working until expiry — there is no per-user STS revocation | ≤ 12 h direct federation (`MaxSessionDuration: 43200`, `bedrock-auth-*.yaml`); ≤ 8 h Cognito identity-pool default (`cognito-identity-pool.yaml` `MaxSessionDuration` default 28800) |
+| 4 | Live STS sessions keep working until expiry, unless you deny that user's role session (see **Per-user cut-off** below) | ≤ 12 h direct federation (`MaxSessionDuration: 43200`, `bedrock-auth-*.yaml`); ≤ 8 h Cognito identity-pool default (`cognito-identity-pool.yaml` `MaxSessionDuration` default 28800) |
 | 5 | Apps gateway and Desktop sessions expire | Follow `session.ttl_hours` in the pinned upstream gateway configuration |
 
 Step 3 commands (Cognito user-pool deployments):
@@ -696,6 +696,36 @@ aws cognito-idp admin-user-global-sign-out --user-pool-id <pool-id> --username <
 `admin-user-global-sign-out` revokes the refresh tokens; already-issued
 access/ID tokens still run out their ≤ 60-minute validity.)
 
+**Per-user cut-off** (one user; other users are unaffected): attach an inline
+deny to the federated role with a `StringLike` condition on `aws:userid` equal to
+`<role-unique-id>:<session-name>`. That value is the `UserId` that
+`aws sts get-caller-identity` or CloudTrail shows for the user, in the form
+`<role-unique-id>:user@example.com`; `aws iam get-role --role-name <role>
+--query Role.RoleId` returns the role's unique ID.
+
+```json
+{
+  "Version": "2012-10-17",
+  "Statement": [{
+    "Sid": "OffboardUser",
+    "Effect": "Deny",
+    "Action": "*",
+    "Resource": "*",
+    "Condition": {"StringLike": {"aws:userid": "<role-unique-id>:user@example.com"}}
+  }]
+}
+```
+
+See [Disabling permissions for temporary
+security credentials](https://docs.aws.amazon.com/IAM/latest/UserGuide/id_credentials_temp_control-access_disable-perms.html);
+the policy can take a few minutes to take effect. The deny also covers the user's
+new sessions only when session-name binding (**Email claim** or **Sub claim**) is
+on. With the default **None** binding, a modified client can pick another session
+name, so the IdP deactivation is what stops new sessions. Not yet tested against
+Claude Desktop's short-term Amazon Bedrock API key, which inherits the
+permissions of the IAM principal that generated it
+([Amazon Bedrock API keys](https://docs.aws.amazon.com/bedrock/latest/userguide/api-keys.html)).
+
 **Break-glass** (kills sessions for *every* user on the role, not just one):
 attach an inline deny policy with an `aws:TokenIssueTime` condition ("revoke
 active sessions") to the Bedrock access role, forcing all users to
@@ -705,7 +735,8 @@ session-invalidation procedure.
 
 ### Offboarding checklist
 
-1. Deactivate the user in the IdP.
+1. Deactivate the user in the IdP. If the user may still hold live credentials,
+   also apply the **Per-user cut-off** above; you can remove it after 12 hours.
 2. Cognito user-pool deployments: `admin-disable-user` +
    `admin-user-global-sign-out` (above), and later
    `admin-delete-user` to remove the pool's stored profile (email, name).

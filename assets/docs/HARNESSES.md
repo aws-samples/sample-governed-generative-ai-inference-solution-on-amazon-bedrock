@@ -253,7 +253,7 @@ equally to Cline and Continue — they ride the same profile.)
 | Model inference with governed credentials | ✅ | ✅ OpenCode / Pi / Aider; ❌ Codex (Mantle endpoint denied, see [Codex](#openai-codex-cli)) |
 | **Per-user OTEL telemetry → solution dashboards** | ✅ emits OTEL metrics | ❌ do **not** feed the solution's dashboards |
 | **Per-user usage visibility** | OTEL dashboards + CUR | Session-name CUR attribution; plus, when deployed, server-side metering from Bedrock invocation logs covers **all harnesses identically** ([design](designs/server-side-metering-design.md)) |
-| **Default-model lock** | ✅ `managed-settings.json` (OS-managed, non-overridable) | ❌ managed-settings is Claude-Code-only; these harnesses rely on the IAM `RestrictToAnthropicModels` allow-list (any permitted Anthropic model is selectable) |
+| **Default model via managed settings** | ✅ `managed-settings.json` sets it (OS-managed, highest precedence). It's a default, not a lock: `--model` and `ANTHROPIC_MODEL` still pick the session model, and only `availableModels` (not written by this sample) restricts the choice | ❌ managed-settings is Claude-Code-only; these harnesses rely on the IAM `RestrictToAnthropicModels` allow-list (any permitted Anthropic model is selectable) |
 | **Web search (AgentCore gateway MCP)** | ✅ native `headersHelper` (see [Platform tools](#platform-tools-mcp)) | ✅ OpenCode / Codex via the `--mcp-proxy` stdio shim; ❌ Pi / Aider (no MCP support upstream) |
 | **Claude apps gateway** | ✅ optional gateway integration | ❌ Claude-Code-only; other harnesses keep direct Bedrock access |
 

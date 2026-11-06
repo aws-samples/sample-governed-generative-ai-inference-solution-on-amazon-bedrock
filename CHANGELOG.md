@@ -353,6 +353,32 @@ The first nine entries were found in an end-to-end sidecar-mode test on
 
 ### Documentation
 
+- Managed settings wording now matches Claude Code's behavior: a managed
+  `model` is a default, not a lock (`--model` and `ANTHROPIC_MODEL` still pick
+  the session model; only `availableModels` restricts the choice). The
+  `gip init` prompt for `lock_default_model`, the `--managed` help, the
+  installer messages, the harness notes and the README, CLI Reference,
+  Deployment and Harnesses docs no longer say managed settings are
+  "non-overridable" or lock the model. The `lock_default_model` field and
+  what it writes are unchanged. QUOTA_MONITORING: lowering
+  `max_session_duration` doesn't change the role's 12-hour maximum.
+- Heading anchors on QUOTA_MONITORING (server-side metering) and CLI_REFERENCE
+  (cross-arch macOS build) now use `<a id>` tags, so links to them work on
+  GitHub as well as on the docs site; GitHub ignores `{#id}` heading suffixes.
+- RUNBOOKS offboarding: added a per-user cut-off (inline deny on the role for the
+  user's `aws:userid`) and removed the claim that per-user STS revocation isn't
+  possible. QUOTA_MONITORING: `gip deploy metering` doesn't pass
+  `AdoptExistingConfig` yet, and content-logging accounts should use a dedicated
+  inference account or CUR 2.0. ARCHITECTURE: `max_session_duration` sets what
+  the client requests, not the role's 12-hour maximum. DEPLOYMENT: managed
+  settings bind Claude Code only and local admins can edit them; the installer
+  stops on a foreign `managed-settings.json`. GUARDRAILS: comprehensive message
+  guarding re-evaluates the whole conversation each turn for billing and quotas.
+- The README, Quick Start and Deployment Paths no longer list CI usage as a
+  reason to choose the credential-process architecture: both sign-in paths
+  need a person (OIDC browser sign-in with PKCE, IAM Identity Center device
+  authorization). The README's Authentication Modes section now says how to
+  handle unattended workloads (their own scoped IAM role).
 - Replaced high-level cost guidance with a cited scenario model covering cached
   and uncached usage, topology-dependent infrastructure floors, optional
   component add-ons, CRIS pricing ambiguity, and runtime-dependent exclusions.

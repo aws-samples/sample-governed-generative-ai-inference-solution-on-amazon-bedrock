@@ -11,8 +11,8 @@ path's guide.
 > **Deploying Claude Code / Claude Desktop only?** Start with **Path 4 (Claude
 > apps gateway)** — Anthropic's first-party control plane, recommended for
 > Claude apps on Bedrock. Paths 1–3 deploy the credential-process
-> architecture; choose them when you need IAM Identity Center, CI usage,
-> per-user CloudTrail/CUR attribution, or non-Claude harnesses.
+> architecture; choose them when you need IAM Identity Center, per-user
+> CloudTrail/CUR attribution, or non-Claude harnesses.
 
 | # | Path | Best for | Admin skill assumed | Time to first token |
 |---|------|----------|--------------------|---------------------|
@@ -185,7 +185,7 @@ Hand the agent that file and your IdP details; expect ~1 hour supervised.
 
 | Customer profile | Recommended | Why |
 |---|---|---|
-| Claude Code / Claude Desktop only, any size | 4 (+1 for CI/IDC users) | First-party control plane; server-side model/spend policy; no per-dev credentials or packages |
+| Claude Code / Claude Desktop only, any size | 4 (+1 for IDC users) | First-party control plane; server-side model/spend policy; no per-dev credentials or packages |
 | Startup / SMB, <50 devs, no dedicated platform team | 4 if Claude-only; else 5 (agent) or 1 | Gateway is one stack; wizard defaults are sane; consider Cognito user pool to skip external IdP setup |
 | Mid-market with an IdP and an infra team | 1, then 2 for day-2 changes | Wizard first, export answers file, manage in git thereafter |
 | Traditional enterprise, console-driven change management | 3 (+hybrid packaging) | Template review + change tickets per stack; no admin-side tooling |

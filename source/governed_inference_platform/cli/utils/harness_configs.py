@@ -519,8 +519,8 @@ packaged Claude Code settings use:
 |---|---|
 {model_rows}
 
-**What does NOT carry over:** Claude Code's OTEL telemetry dashboards, managed-settings
-model locks, and the Claude apps gateway are Claude-Code-only. See
+**What does NOT carry over:** Claude Code's OTEL telemetry dashboards, the managed-settings
+default model, and the Claude apps gateway are Claude-Code-only. See
 `assets/docs/HARNESSES.md` in the solution repository for the full capability matrix.
 
 ---

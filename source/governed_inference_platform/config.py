@@ -46,7 +46,7 @@ class Profile:
     selected_model: str | None = None  # Selected Claude model ID (e.g., "us.anthropic.claude-3-7-sonnet-20250805-v1:0")
     model_alias: str | None = None  # Claude Code alias for ANTHROPIC_MODEL: "sonnet", "opus", "opusplan", "haiku"
     lock_default_model: bool = (
-        False  # Write ANTHROPIC_MODEL + DEFAULT_*_MODEL into managed-settings (locks users to admin's choice)
+        False  # Write ANTHROPIC_MODEL + DEFAULT_*_MODEL into managed-settings (a default, not a lock)
     )
     selected_source_region: str | None = None  # User-selected source region for AWS config and Claude Code settings
     created_at: str = field(default_factory=lambda: datetime.now(timezone.utc).isoformat())
@@ -209,7 +209,7 @@ class Profile:
 
     # Settings deployment target
     # "user" = ~/.claude/settings.json (default, lowest precedence)
-    # "managed" = OS-level managed-settings.json (highest precedence, non-overridable)
+    # "managed" = OS-level managed-settings.json (highest precedence; user settings can't override it)
     settings_target: str = "user"
 
     # Claude Cowork 3P MDM configuration

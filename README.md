@@ -46,7 +46,7 @@ This generates MDM configuration files (JSON, macOS .mobileconfig, Windows .reg,
 Two connection modes:
 
 - **Claude apps gateway (recommended):** Anthropic's first-party control plane — nothing to install on developer machines beyond Claude Code itself. Details in [the gateway section](#claude-apps-gateway-recommended-for-claude-apps).
-- **credential-process:** developers sign in with SSO; the binary vends temporary AWS credentials to the AWS SDK and quota-gates issuance when a quota endpoint is configured. Choose it when you need full per-user CloudTrail/CUR attribution, IAM Identity Center, or CI usage. Packaged and distributed via `gip package` / `gip distribute`.
+- **credential-process:** developers sign in with SSO; the binary vends temporary AWS credentials to the AWS SDK and quota-gates issuance when a quota endpoint is configured. Choose it when you need full per-user CloudTrail/CUR attribution or IAM Identity Center. Packaged and distributed via `gip package` / `gip distribute`.
 
 ### Other CLI harnesses: OpenCode, Codex CLI, Pi, Aider
 
@@ -56,7 +56,7 @@ A harness that uses the AWS SDK default chain can use the same SSO login, quota 
 poetry run gip package --harnesses all
 ```
 
-See the [Harnesses Guide](assets/docs/HARNESSES.md) for per-harness setup and an honest capability matrix (telemetry dashboards and managed-settings model locks remain Claude-Code-only; per-user usage for other harnesses comes from CUR session-name attribution and optional [server-side metering](assets/docs/QUOTA_MONITORING.md#server-side-metering-tamper-proof-usage), which covers every harness identically). When [web search](assets/docs/WEB_SEARCH.md) is enabled, `gip package` also wires the gateway MCP endpoint into OpenCode and Codex CLI via a stdio proxy on the same binary (Pi and Aider have no MCP support upstream).
+See the [Harnesses Guide](assets/docs/HARNESSES.md) for per-harness setup and an honest capability matrix (telemetry dashboards and the managed-settings default model remain Claude-Code-only; per-user usage for other harnesses comes from CUR session-name attribution and optional [server-side metering](assets/docs/QUOTA_MONITORING.md#server-side-metering-tamper-proof-usage), which covers every harness identically). When [web search](assets/docs/WEB_SEARCH.md) is enabled, `gip package` also wires the gateway MCP endpoint into OpenCode and Codex CLI via a stdio proxy on the same binary (Pi and Aider have no MCP support upstream).
 
 ## Key Features
 
@@ -77,7 +77,7 @@ See the [Harnesses Guide](assets/docs/HARNESSES.md) for per-harness setup and an
 ### Consumer integrations
 
 - **Any Harness, One Plug**: The same credential-process powers [OpenCode, Codex CLI, Pi, and Aider](assets/docs/HARNESSES.md) — SSO, quotas, and attribution apply below the harness layer
-- **Two Architectures**: The [Claude apps gateway](assets/docs/APPS_GATEWAY.md) central control plane (recommended for Claude Code and Claude Desktop) or per-developer STS federation (for other harnesses, IAM Identity Center, CI, and per-user AWS-native audit) — deployable side by side
+- **Two Architectures**: The [Claude apps gateway](assets/docs/APPS_GATEWAY.md) central control plane (recommended for Claude Code and Claude Desktop) or per-developer STS federation (for other harnesses, IAM Identity Center, and per-user AWS-native audit) — deployable side by side
 - **Platform Tools over MCP** (optional): [Web search](assets/docs/WEB_SEARCH.md) grounded in Amazon's web index and log-only [memory](assets/docs/MEMORY.md) behind one [AgentCore Gateway endpoint](assets/docs/MCP_GATEWAY.md) — wired into Claude Code, Claude Desktop, OpenCode, and Codex CLI; group entitlement and identity-dependent memory activation are rejected pending redesign
 - **Skills Registry** (optional): Governed publish → approve → distribute lifecycle for [agent skills](assets/docs/SKILLS_REGISTRY.md) — immutable content-addressed artifacts, IAM-separated publisher/curator roles, delivered to Claude Code, OpenCode, Codex CLI, and AgentCore harnesses
 - **One Deployment, Two Surfaces**: Same infrastructure powers both Claude Code CLI and Claude Desktop (which features Chat, Cowork and Code)
@@ -150,6 +150,8 @@ This guidance supports three identity paths. Each path provides usage monitoring
 | **AWS IAM Identity Center** | `AWS IAM Identity Center` | `AWSReservedSSO_*` IAM role ARN (email in session name) | Up to 90 days (recommended: 7 days) | ✅ Via SigV4 | Orgs on native AWS identity, or where OIDC localhost callback is blocked |
 | **None** | `None` | IAM user ARN or hashed role principal | AWS credential TTL | ❌ Not available | Internal tools / analytics-only deployments |
 
+**Unattended workloads:** Both sign-in paths need a person. OIDC uses a browser sign-in with PKCE, and IAM Identity Center uses device authorization. CI jobs and other unattended workloads don't use the sample's sign-in. Give them their own IAM role with the same model and Region scoping as the federated role, so CloudTrail records their calls under that role.
+
 For deployment patterns and best practices, see the [Claude Code deployment patterns and best practices with Amazon Bedrock](https://aws.amazon.com/blogs/machine-learning/claude-code-deployment-patterns-and-best-practices-with-amazon-bedrock/) blog post.
 
 ### Claude Apps Gateway (recommended for Claude apps)
@@ -166,7 +168,7 @@ For new deployments of Claude apps on Amazon Bedrock, Anthropic's [Claude apps g
 
 **💻 [Need a separate Claude Desktop configuration/MCP overlay? Add the Bootstrap companion](https://github.com/aws-samples/anthropic-on-aws/tree/main/claude-apps-gateway-bootstrap)** — it attaches to the same gateway and delivers its upstream PKCE configuration contract.
 
-Choose the credential-process architecture instead when you need per-user CloudTrail/CUR attribution, IAM Identity Center, CI usage, or non-Claude consumers (internal AWS SDK apps, OpenCode, Pi, Aider; Codex CLI for MCP tools only). The two can coexist in one account. See the [Apps Gateway guide](assets/docs/APPS_GATEWAY.md) for a full decision table and deployment steps.
+Choose the credential-process architecture instead when you need per-user CloudTrail/CUR attribution, IAM Identity Center, or non-Claude consumers (internal AWS SDK apps, OpenCode, Pi, Aider; Codex CLI for MCP tools only). The two can coexist in one account. See the [Apps Gateway guide](assets/docs/APPS_GATEWAY.md) for a full decision table and deployment steps.
 
 <details>
 <summary><strong>Areas where this platform complements Claude Apps Gateway today</strong></summary>
