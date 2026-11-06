@@ -167,7 +167,7 @@ When using `opusplan` (Opus planning + Sonnet execution), each token batch inclu
 
 > **Why not use the client-side `claude_code.cost.usage` metric?** Claude Code emits a cost estimate natively, but it uses generic Anthropic rates (not Bedrock-specific), resets per session (not accumulated monthly), and cannot be trusted for enforcement (client-controlled). Server-side calculation from service-generated token counts is tamper-resistant, uses admin-configurable Bedrock rates, and aggregates across all sessions. Trusted Direct STS per-user attribution still requires `SessionNameBinding`.
 
-> **CoWork support:** Claude Desktop cost enforcement works when the CoWork dashboard stack is deployed with the `model` MetricFilter dimension (included by default). Requires attribution headers configured so `user_email` and `model` dimensions are present in the events.
+> **CoWork support:** credential-process checks quota when it refreshes Claude Desktop's credentials, but Desktop telemetry is aggregate-only, so Desktop usage isn't counted toward individual quota records. See [CoWork 3P Usage Counting](#cowork-3p-usage-counting).
 
 
 ## Token-Based Limits (Legacy)
@@ -443,7 +443,7 @@ To request an unblock, contact your administrator.
 
 ### Periodic Quota Re-Check
 
-By default, quota is re-checked every 30 minutes even when credentials are cached. This closes the enforcement gap where users could continue working for up to 12 hours after being blocked (the credential cache duration).
+By default, quota is re-checked every 30 minutes even when credentials are cached. The re-check runs only when credential-process runs: when a new session starts, or when an AWS SDK refreshes credentials before they expire ([process credential provider](https://docs.aws.amazon.com/sdkref/latest/guide/feature-process-credentials.html)). A client that already holds credentials keeps using them until they near expiry, so a block doesn't end a running session. The interval bounds how long credential-process keeps returning cached credentials after a block.
 
 Configure during `gip init`:
 
@@ -467,7 +467,7 @@ Configure during `gip init`:
 **Trade-offs:**
 
 - **Interval = 0** (strictest): Every request checks quota. Adds ~200ms latency to each credential request. Use for strict cost control where immediate enforcement is critical.
-- **Interval = 30** (recommended): Balance between enforcement tightness and user experience. Users are blocked within 30 minutes of exceeding quota.
+- **Interval = 30** (recommended): Balance between enforcement tightness and user experience. New credential requests are blocked within 30 minutes of exceeding quota; a running session keeps its credentials until they expire.
 - **Interval = 60+** (relaxed): Minimal impact but users may work up to an hour after being blocked.
 
 The check happens in the background when returning cached credentials - users only see a browser notification if their quota status changes.
@@ -1011,8 +1011,10 @@ totals per user and publishes a `MeteringDrift` metric (namespace
 `GIP/Quota`, dimension `user.email`, in percent):
 `drift = (client - server) / max(server, 1)` — a stopped sidecar drives drift
 toward −100%. When `|drift| > 25%` **and** the server total exceeds 1M tokens
-(noise floor; both tunable via the `DRIFT_ALERT_PERCENT` /
-`DRIFT_MIN_SERVER_TOKENS` Lambda env vars), a `metering_drift` SNS alert goes
+(noise floor; both read from the `DRIFT_ALERT_PERCENT` /
+`DRIFT_MIN_SERVER_TOKENS` Lambda environment variables, which the stack doesn't
+set or expose as parameters yet, so a hand-edited value can be lost on a stack
+update), a `metering_drift` SNS alert goes
 to the existing quota alert topic (deduped per user per month like other
 alerts). This catches both sidecar stoppage and OTEL pipeline bugs.
 

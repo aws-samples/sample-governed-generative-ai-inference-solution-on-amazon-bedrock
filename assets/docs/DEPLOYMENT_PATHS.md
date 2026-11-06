@@ -29,9 +29,10 @@ Two cross-cutting facts to know before choosing:
   you: (a) register an OIDC application in your identity provider
   ([provider guides](providers/README.md)), and (b) enable Anthropic model access in
   the Amazon Bedrock console for your regions.
-- **End users never need Python, AWS accounts, or build tools** on any path —
+- **End users never need AWS accounts or build tools** on any path —
   they receive a package (or MDM profile) and sign in with their normal
-  work account.
+  work account. The macOS and Linux installer needs `python3` to read the
+  package configuration.
 - **Region choice is a separate architecture decision.** Review the
   [eight-region deployability and residency matrix](ARCHITECTURE.md#eight-region-deployability)
   before selecting an infrastructure Region, CRIS geography, or optional

@@ -721,10 +721,21 @@ security credentials](https://docs.aws.amazon.com/IAM/latest/UserGuide/id_creden
 the policy can take a few minutes to take effect. The deny also covers the user's
 new sessions only when session-name binding (**Email claim** or **Sub claim**) is
 on. With the default **None** binding, a modified client can pick another session
-name, so the IdP deactivation is what stops new sessions. Not yet tested against
-Claude Desktop's short-term Amazon Bedrock API key, which inherits the
-permissions of the IAM principal that generated it
-([Amazon Bedrock API keys](https://docs.aws.amazon.com/bedrock/latest/userguide/api-keys.html)).
+name, so the IdP deactivation is what stops new sessions.
+
+Claude Desktop's short-term Amazon Bedrock API key inherits the credentials and
+expiration of the session that generated it. AWS documents two ways to stop one
+before it expires, and both act on every user of the role: invalidate the role's
+sessions (**Break-glass** below) or deny `bedrock:CallWithBearerToken` on the role
+([Handle compromised Amazon Bedrock API keys](https://docs.aws.amazon.com/bedrock/latest/userguide/api-keys-revoke.html)).
+Whether the per-user `aws:userid` deny also blocks the key is not yet tested.
+
+Keep the per-user deny in place until every session the user could still create
+has expired: 12 hours after the last ID token the user holds expires. That is the
+deactivation time plus your IdP's ID-token lifetime, because credential-process
+can still exchange a cached, unexpired ID token; for Cognito user pools, count
+from `admin-user-global-sign-out` plus the ≤ 60-minute token validity. Leaving it in
+place longer is harmless; it matches only that user's session.
 
 **Break-glass** (kills sessions for *every* user on the role, not just one):
 attach an inline deny policy with an `aws:TokenIssueTime` condition ("revoke
@@ -736,7 +747,8 @@ session-invalidation procedure.
 ### Offboarding checklist
 
 1. Deactivate the user in the IdP. If the user may still hold live credentials,
-   also apply the **Per-user cut-off** above; you can remove it after 12 hours.
+   also apply the **Per-user cut-off** above, and keep it for the period the
+   cut-off section gives.
 2. Cognito user-pool deployments: `admin-disable-user` +
    `admin-user-global-sign-out` (above), and later
    `admin-delete-user` to remove the pool's stored profile (email, name).
