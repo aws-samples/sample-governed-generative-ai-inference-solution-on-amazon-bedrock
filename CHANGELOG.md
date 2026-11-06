@@ -353,6 +353,16 @@ The first nine entries were found in an end-to-end sidecar-mode test on
 
 ### Documentation
 
+- Follow-up consistency fixes: HARNESSES no longer says managed settings lock
+  Claude Code's model. QUOTA_MONITORING: the periodic quota re-check runs only
+  when credential-process runs, so a block doesn't end a running session; Claude
+  Desktop usage isn't counted toward individual quotas (the old "CoWork support"
+  note said otherwise); the drift thresholds aren't stack parameters yet.
+  RUNBOOKS: how long to keep the per-user deny, and AWS's documented controls for
+  Claude Desktop's short-term API key. README, Quick Start and Deployment Paths:
+  the macOS and Linux installer needs `python3`. GUARDRAILS cites the enforced
+  guardrails FAQ on quota consumption. COWORK_3P: Desktop uses the credential
+  helper by default, not the AWS profile.
 - Managed settings wording now matches Claude Code's behavior: a managed
   `model` is a default, not a lock (`--model` and `ANTHROPIC_MODEL` still pick
   the session model; only `availableModels` restricts the choice). The

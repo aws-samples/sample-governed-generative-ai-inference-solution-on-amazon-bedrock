@@ -312,7 +312,7 @@ If a user exceeds their quota, new and refreshed credentials are withheld until 
 - OIDC identity provider (Okta, Entra ID, Auth0, Google, Cognito) or AWS IAM Identity Center
 - Go 1.24+ for the default `gip package` build path; the deprecated `--legacy` path uses Python build tools instead
 
-**End users need only:** Claude Code or Claude Desktop installed. No Python, AWS account, or build tools required — IT distributes pre-built packages.
+**End users need only:** Claude Code or Claude Desktop installed, plus `python3` on macOS and Linux, where the installer uses it to read the package configuration. No AWS account or build tools required — IT distributes pre-built packages.
 
 ### Supported Regions
 

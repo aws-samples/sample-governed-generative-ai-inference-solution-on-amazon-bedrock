@@ -265,9 +265,9 @@ Two practical consequences:
    [server-side metering design](designs/server-side-metering-design.md)
    closes the gap authoritatively for every harness (it meters Bedrock
    invocation logs, which no client can suppress).
-2. **Model governance shifts from settings to IAM.** Claude Code can be locked
-   to a specific default model via managed settings; the other harnesses can
-   pick any model the IAM policy allows. If a hard model allow-list matters,
+2. **Model governance shifts from settings to IAM.** Managed settings can set
+   Claude Code's default model, but that's a default, not a lock; the other
+   harnesses can pick any model the IAM policy allows. If a hard model allow-list matters,
    enforce it in IAM (it already applies to every harness).
 
 ## Platform tools (MCP)

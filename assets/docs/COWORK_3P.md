@@ -456,7 +456,7 @@ gateway deployments use the upstream gateway's own inline spend controls.
 
 ### How enforcement applies
 
-CoWork uses `credential-process` for credential refresh (via the `inferenceBedrockProfile` AWS named profile). The credential-process binary checks the quota API on every refresh cycle:
+CoWork gets credentials from `credential-process`: by default directly through `inferenceCredentialHelper` (`credential-process --desktop`, which returns a short-term Amazon Bedrock API key), or through the `inferenceBedrockProfile` AWS named profile. The credential-process binary checks the quota API on every refresh cycle (profile mode shown):
 
 1. CoWork's AWS session token expires (~1 hour)
 2. AWS SDK calls `credential-process --profile <name>` for fresh credentials
@@ -464,7 +464,7 @@ CoWork uses `credential-process` for credential refresh (via the `inferenceBedro
 4. If the user is over quota → credentials are denied → CoWork loses Bedrock access
 5. If under quota → fresh credentials issued → CoWork continues
 
-**Enforcement granularity:** Per credential refresh (~1 hour). A user can exceed their quota within a session but will be blocked on the next refresh.
+**Enforcement granularity:** Per credential refresh. A user can exceed their quota within a session but will be blocked on the next refresh.
 
 ### How CoWork usage is counted
 
