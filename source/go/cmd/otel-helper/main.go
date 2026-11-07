@@ -117,7 +117,7 @@ func resolveProfile(flagValue string) string {
 func run(testMode bool, profile string) int {
 	// Sidecar mode: make sure the local collector is running before Claude Code
 	// exports to localhost:4318. No-op when otelcol isn't installed (central
-	// mode) and on Windows. Never writes to stdout.
+	// mode). Never writes to stdout.
 	ensureCollector(profile)
 
 	// Layer 1: Serve attribution from the file cache. The cache stores

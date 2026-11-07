@@ -181,3 +181,22 @@ def test_default_duration_follows_federation_type(federation, expected):
             pass
 
     assert captured["config"]["max_session_duration"] == expected
+
+
+@pytest.mark.parametrize("configured,expected", [(3600, "3600"), (None, "28800")])
+def test_parameters_file_follows_session_duration(tmp_path, configured, expected):
+    """The legacy parameters-file writer passes the configured duration, not a fixed 28800."""
+    import json
+
+    config = {
+        "okta": {"domain": "company.okta.com", "client_id": "0oa0000000000000000"},
+        "aws": {"identity_pool_name": "gip-test", "allowed_bedrock_regions": ["us-east-1"]},
+        "monitoring": {"enabled": False},
+    }
+    if configured is not None:
+        config["max_session_duration"] = configured
+    params_file = tmp_path / "params.json"
+    InitCommand()._update_parameters_file(params_file, config)
+
+    params = {p["ParameterKey"]: p["ParameterValue"] for p in json.loads(params_file.read_text())}
+    assert params["MaxSessionDuration"] == expected

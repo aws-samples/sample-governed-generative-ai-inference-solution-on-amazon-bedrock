@@ -46,7 +46,7 @@ The role also grants `bedrock:CallWithBearerToken` (Claude Desktop bearer tokens
 
 When monitoring is enabled, the solution supports two deployment modes:
 
-**Central Mode** (default): A shared, server-side collector ingests metrics from all clients.
+**Central Mode** (the auth template's `MonitoringMode` default; `gip init` recommends Sidecar): A shared, server-side collector ingests metrics from all clients.
 - Client → ALB → ECS OTEL Collector → CloudWatch OTLP + EMF logs
 - Deploys a VPC with public subnets, an ECS Fargate cluster running the OpenTelemetry collector, and an Application Load Balancer as the ingestion endpoint. When analytics is enabled, the collector additionally writes EMF logs to CloudWatch Logs for the analytics pipeline (Athena SQL over historical data).
 
@@ -69,7 +69,7 @@ The system supports two authentication methods:
 **Direct IAM Federation**
 - Uses IAM OIDC Provider with STS AssumeRoleWithWebIdentity
 - Direct federation from OIDC tokens to AWS credentials
-- Configurable session duration up to 12 hours
+- Configurable session duration up to 12 hours; `gip deploy auth` sets the role's maximum to the same value
 
 **Cognito Identity Pool**
 - Uses Amazon Cognito Identity Pool as federation broker
@@ -134,7 +134,7 @@ For organizations with monitoring enabled, the package also includes the OTEL he
 
 The security architecture addresses several threat vectors inherent in enterprise authentication systems. Each design decision directly mitigates specific risks while maintaining usability.
 
-Credential theft represents the most common attack vector in authentication systems. Traditional long-lived API keys create persistent risk - once stolen, they remain valid until manually revoked. Our architecture eliminates this risk by using only temporary credentials that expire automatically. Direct STS credentials last the `max_session_duration` that credential-process requests (default and maximum 12 hours). The federated role's `MaxSessionDuration` is fixed at 12 hours in the auth templates, so a lower setting shortens what an unmodified client requests, not what the role allows; Cognito Identity Pool credentials last one hour. Even if credentials are somehow compromised, the attacker's window of opportunity is limited and closes automatically.
+Credential theft represents the most common attack vector in authentication systems. Traditional long-lived API keys create persistent risk - once stolen, they remain valid until manually revoked. Our architecture eliminates this risk by using only temporary credentials that expire automatically. Direct STS credentials last the `max_session_duration` that credential-process requests (default and maximum 12 hours). `gip deploy auth` also sets the federated role's `MaxSessionDuration` to that value, so after the redeploy a lower setting caps every client, modified clients included: STS rejects a request for a longer session. Cognito Identity Pool credentials last one hour. Even if credentials are somehow compromised, the attacker's window of opportunity is limited and closes automatically.
 
 The OAuth2 authorization flow itself presents opportunities for interception attacks. An attacker who intercepts an authorization code could potentially exchange it for tokens. We implement PKCE (Proof Key for Code Exchange, RFC 7636) which generates a dynamic code verifier for each authentication request. This makes intercepted codes useless without the corresponding verifier. Additionally, a cryptographically random state parameter prevents cross-site request forgery attacks.
 
@@ -215,6 +215,7 @@ Cross-Region Inference (CRIS) profiles and the infrastructure region control dif
 - `apac.` is not interchangeable with country-level residency. The observed APAC profiles covered legacy model subsets, while the current AU and JP subsets differ as shown above.
 - `ca-central-1` has no Canadian geographic CRIS. Calling `us.` from Canada processes inference in US Regions; using `global.` also does not provide Canadian residency.
 - Tier fallback for strict `eu`/`au`/`jp` configurations stays in-geography and does not silently substitute `global.` or `us.`. A missing tier therefore resolves to another approved in-geography model or fails to resolve.
+- The optional guardrails stack stays in-Region on its default Classic tier. The opt-in Standard tier evaluates prompts and responses through a guardrail profile that can use other Regions in its geography (for example `eu.guardrail.v1:0` from eu-west-1 can use eu-central-1, eu-west-3 and eu-north-1). Standard applies per Region: a Region without a guardrail profile, or whose profile would evaluate outside a data-residency geography, stays on Classic. `gip` stops when no guardrails Region can use Standard, and for the other checks listed in [Safeguard tier](GUARDRAILS.md#safeguard-tier).
 
 The infrastructure stacks store user-identifying state in their deployment Region:
 

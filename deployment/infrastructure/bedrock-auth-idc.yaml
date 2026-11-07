@@ -136,7 +136,11 @@ Resources:
           - Sid: AllowOwnAccountGuardrails
             Effect: Allow
             Action: 'bedrock:ApplyGuardrail'
-            Resource: !Sub 'arn:${AWS::Partition}:bedrock:*:${AWS::AccountId}:guardrail/*'
+            # guardrail-profile/*: a Standard-tier guardrail is evaluated through a
+            # system-defined guardrail profile in the destination Regions.
+            Resource:
+              - !Sub 'arn:${AWS::Partition}:bedrock:*:${AWS::AccountId}:guardrail/*'
+              - !Sub 'arn:${AWS::Partition}:bedrock:*:${AWS::AccountId}:guardrail-profile/*'
             Condition:
               StringEquals:
                 'aws:RequestedRegion': !Ref AllowedBedrockRegions

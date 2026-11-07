@@ -671,18 +671,19 @@ deployment as transient.
 ## 8. User offboarding
 
 What actually happens when an employee leaves, path by path — and what does
-**not** happen on its own. IdP deactivation is the kill switch for new
-credentials; already-issued credentials expire on their own schedule, and
-several data stores retain the user's email after departure.
+**not** happen on its own. IdP deactivation stops new sign-ins and token
+refreshes. A cached ID token that hasn't expired can still be exchanged for
+credentials until it expires, already-issued credentials expire on their own
+schedule, and several data stores retain the user's email after departure.
 
 ### Access shutdown timeline
 
 | # | Action / effect | Latency after IdP deactivation |
 |---|---|---|
 | 1 | Deactivate the user in the IdP (Okta/Entra/Federate) | you do this — everything below keys off it |
-| 2 | OIDC refresh stops: the IdP returns `invalid_grant`, the client discards the stored refresh token and the interactive browser flow also fails (`source/go/internal/oidc/token.go:RefreshTokenExchange`) | immediate (direct-IdP profiles) |
+| 2 | OIDC refresh stops: the IdP returns `invalid_grant`, the client discards the stored refresh token and the interactive browser flow also fails (`source/go/internal/oidc/token.go:RefreshTokenExchange`). A cached ID token that hasn't expired can still be exchanged for new credentials (`credential-process` silent refresh) | immediate for refresh (direct-IdP profiles); a cached ID token works until it expires, which is your IdP's ID-token lifetime |
 | 3 | **Cognito user-pool caveat**: Cognito issues its *own* refresh token (valid 600 minutes = 10 h, `cognito-user-pool-setup.yaml` `UserPoolClient.RefreshTokenValidity`) and does not re-check the upstream IdP on refresh. Explicitly revoke: | up to 10 h unless revoked |
-| 4 | Live STS sessions keep working until expiry, unless you deny that user's role session (see **Per-user cut-off** below) | ≤ 12 h direct federation (`MaxSessionDuration: 43200`, `bedrock-auth-*.yaml`); ≤ 8 h Cognito identity-pool default (`cognito-identity-pool.yaml` `MaxSessionDuration` default 28800) |
+| 4 | Live STS sessions keep working until expiry, unless you deny that user's role session (see **Per-user cut-off** below). A cached ID token can also create new sessions until it expires (row 2) | ≤ the `MaxSessionDuration` in force when each session was issued, for direct federation (`bedrock-auth-*.yaml`; the profile's `max_session_duration` after `gip deploy auth`, 43200 = 12 h on stacks deployed before that; `aws iam get-role` shows it); ≤ 1 h for Cognito identity-pool credentials, which the enhanced flow (`GetCredentialsForIdentity`) issues for one hour whatever the role's `MaxSessionDuration` ([identity pools authentication flow](https://docs.aws.amazon.com/cognito/latest/developerguide/authentication-flow.html)) |
 | 5 | Apps gateway and Desktop sessions expire | Follow `session.ttl_hours` in the pinned upstream gateway configuration |
 
 Step 3 commands (Cognito user-pool deployments):
@@ -721,27 +722,38 @@ security credentials](https://docs.aws.amazon.com/IAM/latest/UserGuide/id_creden
 the policy can take a few minutes to take effect. The deny also covers the user's
 new sessions only when session-name binding (**Email claim** or **Sub claim**) is
 on. With the default **None** binding, a modified client can pick another session
-name, so the IdP deactivation is what stops new sessions.
+name, so new sessions stop only when the user's last cached ID token has expired
+after the IdP deactivation.
 
 Claude Desktop's short-term Amazon Bedrock API key inherits the credentials and
 expiration of the session that generated it. AWS documents two ways to stop one
 before it expires, and both act on every user of the role: invalidate the role's
 sessions (**Break-glass** below) or deny `bedrock:CallWithBearerToken` on the role
 ([Handle compromised Amazon Bedrock API keys](https://docs.aws.amazon.com/bedrock/latest/userguide/api-keys-revoke.html)).
-Whether the per-user `aws:userid` deny also blocks the key is not yet tested.
+For one user, the per-user `aws:userid` deny above is enough: in a test it also
+blocked a short-term key generated from that user's session, because the key
+carries the permissions of the session that generated it.
 
 Keep the per-user deny in place until every session the user could still create
-has expired: 12 hours after the last ID token the user holds expires. That is the
-deactivation time plus your IdP's ID-token lifetime, because credential-process
-can still exchange a cached, unexpired ID token; for Cognito user pools, count
-from `admin-user-global-sign-out` plus the ≤ 60-minute token validity. Leaving it in
-place longer is harmless; it matches only that user's session.
+has expired: the role's maximum session duration after the last ID token the user
+holds expires. That ID token expires by the deactivation time plus your IdP's
+ID-token lifetime, and it matters because credential-process can still exchange a
+cached, unexpired ID token; for Cognito user pools, count from
+`admin-user-global-sign-out` plus the ≤ 60-minute token validity. The maximum is the
+role's `MaxSessionDuration`, which `gip deploy auth` sets from the profile's
+`max_session_duration` (12 hours on a stack deployed before that). If you lowered
+it recently, count with the previous value: a new maximum applies only to sessions
+created after the change, and earlier sessions keep their expiry
+([update the maximum session duration](https://docs.aws.amazon.com/IAM/latest/UserGuide/id_roles_update-role-settings.html#id_roles_update-session-duration)). `aws iam get-role --role-name <role> --query
+Role.MaxSessionDuration` shows it. Leaving the deny in place longer is harmless; it
+matches only that user's session.
 
 **Break-glass** (kills sessions for *every* user on the role, not just one):
 attach an inline deny policy with an `aws:TokenIssueTime` condition ("revoke
-active sessions") to the Bedrock access role, forcing all users to
-re-authenticate — the departed user can't. Use only when a 12-hour tail is
-unacceptable. For the apps gateway, follow the pinned upstream emergency
+active sessions") to the Bedrock access role, forcing all users to get new
+credentials. The departed user can't sign in again, but can still exchange a cached
+ID token until it expires, so keep the per-user deny in place for that window. Use only when waiting out the role's
+maximum session duration is unacceptable. For the apps gateway, follow the pinned upstream emergency
 session-invalidation procedure.
 
 ### Offboarding checklist

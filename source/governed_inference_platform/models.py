@@ -8,6 +8,7 @@ This module defines all available Claude models, their supported regions,
 and cross-region inference configurations in one place for easy maintenance.
 """
 
+import re
 from dataclasses import dataclass, field
 from datetime import datetime
 from decimal import Decimal
@@ -1816,6 +1817,43 @@ PROFILE_KEY_ALIASES = {
 # in the GovCloud partition, so a commercial fallback is both invalid at
 # runtime and a residency violation.
 DATA_RESIDENCY_PREFIXES = {"au", "jp", "eu", "us-gov"}
+
+
+def residency_geography_regions(cris_prefix: str | None) -> frozenset[str] | None:
+    """Return the Regions of a data-residency CRIS geography, or None if the prefix isn't one.
+
+    The geography is every source and destination Region that the catalog's
+    inference profiles for that prefix use (for example jp: ap-northeast-1 and
+    ap-northeast-3), the same boundary resolve_model_for_tier keeps model
+    routing inside.
+    """
+    prefix = PROFILE_KEY_ALIASES.get(cris_prefix or "", cris_prefix or "")
+    if prefix not in DATA_RESIDENCY_PREFIXES:
+        return None
+    regions: set[str] = set()
+    for model in CLAUDE_MODELS.values():
+        for key, profile in model.get("profiles", {}).items():
+            if PROFILE_KEY_ALIASES.get(key, key) == prefix:
+                regions.update(profile.get("source_regions", []))
+                regions.update(profile.get("destination_regions", []))
+    return frozenset(regions)
+
+
+# AWS::Bedrock::EnforcedGuardrailConfiguration ModelEnforcement.IncludedModels pattern (Bedrock API
+# reference ModelEnforcement, and CloudFormation early validation observed 2026-11-07). One dot only,
+# so cross-Region inference profile IDs such as us.anthropic.claude-... are rejected. List the
+# foundation-model ID instead: a live check showed it also guards calls made through geographic
+# cross-Region inference profiles (verified for us. with Claude Haiku 4.5; global. profiles and
+# Application Inference Profiles were not tested).
+ENFORCED_GUARDRAIL_MODEL_ID = re.compile(
+    r"^(ALL|([a-z0-9-]{1,63}[.][a-z0-9-]{1,63})([:][a-z0-9-]{1,63}){0,2}(/[a-z0-9]{12})?)$"
+)
+
+
+def invalid_guardrail_include_ids(model_ids: list[str]) -> list[str]:
+    """Return the include-list entries that Bedrock guardrail enforcement does not accept."""
+    return [m.strip() for m in model_ids if not ENFORCED_GUARDRAIL_MODEL_ID.match(m.strip())]
+
 
 # Family tie-break for equal versions in the residency search order
 # (matches the historical hand-maintained preference: sonnet > opus > haiku).

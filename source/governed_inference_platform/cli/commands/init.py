@@ -150,7 +150,10 @@ class InitCommand(Command):
         option(
             "managed",
             None,
-            description="Deploy settings to OS-level managed-settings.json (highest precedence; user settings can't override it)",
+            description=(
+                "Deploy settings to OS-level managed-settings.json (highest precedence in Claude Code; "
+                "binds Claude Code only, and local administrators can still edit the file)"
+            ),
             flag=True,
         ),
         option(
@@ -416,6 +419,106 @@ class InitCommand(Command):
             return False
 
         console.print("")
+        return True
+
+    def _prompt_managed_model_settings(self, config: dict) -> bool:
+        """Managed scope: ask for the managed default model, then the optional restriction.
+
+        Returns False when the user aborts a prompt (Ctrl-C), like the other wizard prompts.
+        """
+        console = Console()
+        # Ask whether to set the default model in managed settings (a default, not a lock)
+        console.print()
+        saved_lock = config.get("lock_default_model", False)
+        saved_restrict = config.get("restrict_model_selection", False)
+        lock_model = questionary.confirm(
+            "Set the default model for all users in managed settings? (A default, not a lock; IAM limits which models they can use)",
+            default=saved_lock,
+        ).ask()
+        if lock_model is None:
+            return False
+        config["lock_default_model"] = lock_model
+        # The restriction needs the managed default, so it is only asked (and only kept) after Yes.
+        config["restrict_model_selection"] = False
+        if not config["lock_default_model"]:
+            console.print(
+                "[green]✓[/green] Managed settings will set no default model or model pins; Claude Code "
+                "uses its built-in Bedrock defaults and users can select models via /model"
+            )
+        else:
+            console.print("[yellow]![/yellow] Default model will be set for all users via managed-settings")
+            # Opt-in restriction on top of the default. Model selection comes later in the wizard.
+            restrict = questionary.confirm(
+                "Also restrict Claude Code to the model you select below? "
+                "(writes availableModels; Claude Code v2.1.175 or later)",
+                default=saved_restrict,
+            ).ask()
+            if restrict is None:
+                return False
+            config["restrict_model_selection"] = bool(restrict)
+            if config["restrict_model_selection"]:
+                console.print(
+                    "[yellow]![/yellow] Model selection will be restricted to that model, plus the Haiku-tier "
+                    "model, which background tasks use and users can also select, through availableModels"
+                )
+                console.print(
+                    "[dim]  Binds Claude Code only; a local administrator can still edit the file, "
+                    "so IAM stays the boundary for models and Regions[/dim]"
+                )
+            else:
+                console.print("[dim]  A default only: users can still pick another model with /model or --model[/dim]")
+        return True
+
+    def _prompt_guardrails(self, config: dict) -> bool:
+        """Ask the Bedrock Guardrails questions. Returns False when the user aborts a prompt."""
+        console = Console()
+        console.print("\n[bold]Bedrock Guardrails Enforcement[/bold]")
+        console.print(
+            "Account-level enforced Bedrock Guardrails for every configured Bedrock\n"
+            "region. This is opt-in and may add latency, throttling, and per-text-unit cost."
+        )
+        enable_guardrails = questionary.confirm(
+            "Enable Bedrock Guardrails account-level enforcement?",
+            default=config.get("guardrails", {}).get("enabled", False),
+        ).ask()
+        if "guardrails" not in config:
+            config["guardrails"] = {}
+        config["guardrails"]["enabled"] = bool(enable_guardrails)
+        if enable_guardrails:
+            strength = questionary.select(
+                "Guardrails content-filter strength:",
+                choices=["LOW", "MEDIUM", "HIGH"],
+                default=config.get("guardrails", {}).get("content_filter_strength") or "MEDIUM",
+            ).ask()
+            config["guardrails"]["content_filter_strength"] = strength
+            tier = questionary.select(
+                "Guardrails content-filter safeguard tier:",
+                choices=[
+                    questionary.Choice("Classic (default): evaluated in each Region", value="CLASSIC"),
+                    questionary.Choice(
+                        "Standard: more robust, more languages; evaluated across Regions in the geography",
+                        value="STANDARD",
+                    ),
+                ],
+                default=config.get("guardrails", {}).get("safeguard_tier") or "CLASSIC",
+            ).ask()
+            if tier is None:  # Ctrl-C / Esc: abort like the rest of the wizard
+                return False
+            config["guardrails"]["safeguard_tier"] = tier
+            if config["guardrails"]["safeguard_tier"] == "STANDARD":
+                console.print(
+                    "[dim]  Standard tier uses cross-Region guardrail inference: prompts and responses can be "
+                    "evaluated in other Regions of the guardrail profile's geography. Regions without a guardrail "
+                    "profile, or whose profile leaves a data-residency geography, stay on Classic, and gip deploy "
+                    "stops if no Region can use Standard.[/dim]"
+                )
+            console.print(
+                "[green]✓[/green] Bedrock Guardrails enforcement will be deployed\n"
+                "[dim]  Run 'gip deploy guardrails' after init. Advanced settings such as "
+                "guardrail name, model include list, and KMS key ARN can be set in the profile JSON.[/dim]"
+            )
+        else:
+            console.print("[dim]Bedrock Guardrails enforcement disabled — can be enabled later via 'gip init'.[/dim]")
         return True
 
     def _gather_configuration(
@@ -1535,6 +1638,26 @@ class InitCommand(Command):
                     if config["quota"].get("enable_bypass_detection"):
                         console.print("  • Sidecar bypass detection: enabled")
 
+                # Server-side metering is turned on in the profile or an answers file, not
+                # here; when it is on (and quota with it), ask about adoption.
+                if config.get("metering", {}).get("enabled") and config.get("quota", {}).get("enabled"):
+                    console.print("\n[bold]Server-Side Metering[/bold]")
+                    console.print(
+                        "[dim]Adopt only an existing metadata-only invocation-logging configuration; "
+                        "the stack rejects one that delivers prompt or response content.[/dim]"
+                    )
+                    adopt_existing = questionary.confirm(
+                        "Adopt this account's existing Bedrock invocation-logging configuration?",
+                        default=bool(config["metering"].get("adopt_existing_config", False)),
+                    ).ask()
+                    config["metering"]["adopt_existing_config"] = bool(adopt_existing)
+
+            # Metering needs quota (validate_config applies the same rule to answers files). A
+            # re-run restores metering from the profile, so turn it off if quota is now off.
+            if config.get("metering", {}).get("enabled") and not config.get("quota", {}).get("enabled"):
+                config["metering"]["enabled"] = False
+                console.print("[yellow]Server-side metering turned off: it requires quota monitoring.[/yellow]")
+
             # Save monitoring progress
             progress.save_step("monitoring_complete", config)
 
@@ -1819,32 +1942,8 @@ class InitCommand(Command):
             console.print("[dim]Model lifecycle alerts disabled — can be enabled later via 'gip init'.[/dim]")
 
         # Bedrock Guardrails account-level enforcement (optional, regional)
-        console.print("\n[bold]Bedrock Guardrails Enforcement[/bold]")
-        console.print(
-            "Account-level enforced Bedrock Guardrails for every configured Bedrock\n"
-            "region. This is opt-in and may add latency, throttling, and per-text-unit cost."
-        )
-        enable_guardrails = questionary.confirm(
-            "Enable Bedrock Guardrails account-level enforcement?",
-            default=config.get("guardrails", {}).get("enabled", False),
-        ).ask()
-        if "guardrails" not in config:
-            config["guardrails"] = {}
-        config["guardrails"]["enabled"] = bool(enable_guardrails)
-        if enable_guardrails:
-            strength = questionary.select(
-                "Guardrails content-filter strength:",
-                choices=["LOW", "MEDIUM", "HIGH"],
-                default=config.get("guardrails", {}).get("content_filter_strength") or "MEDIUM",
-            ).ask()
-            config["guardrails"]["content_filter_strength"] = strength
-            console.print(
-                "[green]✓[/green] Bedrock Guardrails enforcement will be deployed\n"
-                "[dim]  Run 'gip deploy guardrails' after init. Advanced settings such as "
-                "guardrail name, model include list, and KMS key ARN can be set in the profile JSON.[/dim]"
-            )
-        else:
-            console.print("[dim]Bedrock Guardrails enforcement disabled — can be enabled later via 'gip init'.[/dim]")
+        if not self._prompt_guardrails(config):
+            return None
 
         # Claude Desktop MDM configuration
         console.print("\n[bold]Claude Desktop Support[/bold]")
@@ -1911,7 +2010,8 @@ class InitCommand(Command):
         console.print("Choose where Claude Code settings are installed on user machines:")
         console.print("  • User scope: ~/.claude/settings.json (users can override)")
         console.print(
-            "  • Managed (org enforcement): OS-level path (highest precedence; user settings can't override it)"
+            "  • Managed (org enforcement): OS-level path (highest precedence in Claude Code; "
+            "local administrators can still edit it)"
         )
 
         saved_target = config.get("settings_target", "user")
@@ -1934,18 +2034,8 @@ class InitCommand(Command):
             console.print("[green]✓[/green] Settings will be deployed to OS-level managed path")
             console.print("[dim]  Users will need sudo (Unix) or Administrator (Windows) to install[/dim]")
 
-            # Ask whether to lock model selection in managed settings
-            console.print()
-            saved_lock = config.get("lock_default_model", False)
-            lock_model = questionary.confirm(
-                "Set the default model for all users in managed settings? (A default, not a lock; IAM limits which models they can use)",
-                default=saved_lock,
-            ).ask()
-            config["lock_default_model"] = lock_model if lock_model is not None else False
-            if not config["lock_default_model"]:
-                console.print("[green]✓[/green] Users can freely select models via /model (CRIS routing still applied)")
-            else:
-                console.print("[yellow]![/yellow] Default model will be set for all users via managed-settings")
+            if not self._prompt_managed_model_settings(config):
+                return None
         else:
             console.print("[green]✓[/green] Settings will be deployed to user-scope path")
 
@@ -3070,6 +3160,7 @@ class InitCommand(Command):
             "enable_bypass_detection": config_data.get("quota", {}).get("enable_bypass_detection", False),
             "metering_enabled": config_data.get("metering", {}).get("enabled", False),
             "metering_mode": config_data.get("metering", {}).get("mode", "shadow"),
+            "metering_adopt_existing_config": config_data.get("metering", {}).get("adopt_existing_config", False),
             "cowork_3p_enabled": config_data.get("cowork_3p", {}).get("enabled", True),
             "cowork_3p_extra_keys": config_data.get("cowork_3p", {}).get("extra_keys", {}),
             "cowork_service_token": config_data.get("cowork_3p", {}).get("service_token", ""),
@@ -3094,6 +3185,7 @@ class InitCommand(Command):
             "guardrails_content_filter_strength": config_data.get("guardrails", {}).get(
                 "content_filter_strength", "MEDIUM"
             ),
+            "guardrails_safeguard_tier": config_data.get("guardrails", {}).get("safeguard_tier") or "CLASSIC",
             "guardrails_model_include_list": config_data.get("guardrails", {}).get("model_include_list") or [],
             "guardrails_kms_key_arn": config_data.get("guardrails", {}).get("kms_key_arn") or None,
             "cowork_chat_tab_enabled": config_data.get("cowork_3p", {}).get("chat_tab_enabled", True),
@@ -3104,6 +3196,7 @@ class InitCommand(Command):
             if (self._io and self.option("managed"))
             else config_data.get("settings_target", "user"),
             "lock_default_model": config_data.get("lock_default_model", False),
+            "restrict_model_selection": config_data.get("restrict_model_selection", False),
             "tags": config_data.get("tags", {}),
             "redirect_port": config_data.get("redirect_port"),
             "extra_files": config_data.get("extra_files", []),
@@ -3197,7 +3290,8 @@ class InitCommand(Command):
             "IdentityPoolName": config["aws"]["identity_pool_name"],
             "AllowedBedrockRegions": ",".join(config["aws"]["allowed_bedrock_regions"]),
             "EnableMonitoring": "true" if config["monitoring"]["enabled"] else "false",
-            "MaxSessionDuration": "28800",  # 8 hours
+            # The profile's session duration; 28800 (this helper's earlier fixed value) when unset.
+            "MaxSessionDuration": str(config.get("max_session_duration") or 28800),
         }
 
         # Add VPC configuration if monitoring is enabled
@@ -3416,6 +3510,7 @@ class InitCommand(Command):
             # Add lock_default_model if present
             if hasattr(profile, "lock_default_model"):
                 existing_config["lock_default_model"] = profile.lock_default_model
+            existing_config["restrict_model_selection"] = getattr(profile, "restrict_model_selection", False)
 
             # Add cross-region profile if present
             if hasattr(profile, "cross_region_profile") and profile.cross_region_profile:
@@ -3555,11 +3650,20 @@ class InitCommand(Command):
             # Restore model lifecycle alerts opt-in
             existing_config["model_lifecycle"] = {"enabled": getattr(profile, "model_lifecycle_enabled", False)}
 
+            # Restore server-side metering. No wizard question enables it (it comes from
+            # an answers file or the profile JSON), so without this a re-run saved it as off.
+            existing_config["metering"] = {
+                "enabled": getattr(profile, "metering_enabled", False),
+                "mode": getattr(profile, "metering_mode", None) or "shadow",
+                "adopt_existing_config": getattr(profile, "metering_adopt_existing_config", False),
+            }
+
             # Restore Bedrock Guardrails enforcement opt-in
             existing_config["guardrails"] = {
                 "enabled": getattr(profile, "guardrails_enabled", False),
                 "name": getattr(profile, "guardrails_name", "") or "",
                 "content_filter_strength": getattr(profile, "guardrails_content_filter_strength", None) or "MEDIUM",
+                "safeguard_tier": getattr(profile, "guardrails_safeguard_tier", None) or "CLASSIC",
                 "model_include_list": getattr(profile, "guardrails_model_include_list", []) or [],
                 "kms_key_arn": getattr(profile, "guardrails_kms_key_arn", None),
             }

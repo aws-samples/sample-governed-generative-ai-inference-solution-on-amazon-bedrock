@@ -20,6 +20,12 @@ from rich.prompt import Confirm
 
 from governed_inference_platform.cli.utils.proc import run_checked
 
+# Windows PowerShell writes redirected output in the console's OEM code page. Switch it to UTF-8 so
+# non-ASCII paths round-trip; the setter can fail without a console, which leaves the default.
+_PS_UTF8_OUTPUT = "try { [Console]::OutputEncoding = [System.Text.UTF8Encoding]::new($false) } catch { }; "
+# Exit code of the Windows process lookup when the PID has no process.
+_PS_NOT_FOUND = 3
+
 
 class CleanupCommand(Command):
     name = "cleanup"
@@ -571,6 +577,62 @@ class CleanupCommand(Command):
             del lines[start:end]
         self._replace_if_unchanged(aws_config, "".join(lines).encode(), snapshot, mode)
 
+    @staticmethod
+    def _is_windows() -> bool:
+        return os.name == "nt"
+
+    @classmethod
+    def _process_command(cls, pid: int) -> tuple[bool, str]:
+        """Return (running, command) for pid; the command is compared case-insensitively on Windows.
+
+        POSIX reads the command line with ps. Windows has no ps, so it reads the process's
+        executable path and command line from Win32_Process (CIM) through Windows PowerShell.
+        """
+        if cls._is_windows():
+            # UTF-8 output, so a profile path with non-ASCII characters survives the pipe.
+            script = (
+                f"{_PS_UTF8_OUTPUT}$p = Get-CimInstance Win32_Process -Filter 'ProcessId = {int(pid)}' -ErrorAction Stop; "
+                f"if ($null -eq $p) {{ exit {_PS_NOT_FOUND} }}; "
+                "[Console]::Out.Write([string]$p.ExecutablePath + [char]10 + [string]$p.CommandLine)"
+            )
+            result = subprocess.run(  # nosec B603 — fixed argv, int-cast pid, no shell
+                ["powershell.exe", "-NoProfile", "-NonInteractive", "-Command", script],
+                capture_output=True,
+                timeout=15,
+                check=False,
+                encoding="utf-8",
+                errors="replace",
+            )
+        else:
+            result = subprocess.run(  # nosec B603 — fixed argv, int-cast pid, no shell
+                ["ps", "-p", str(int(pid)), "-o", "command="],
+                capture_output=True,
+                timeout=5,
+                check=False,
+                text=True,
+            )
+        command = result.stdout.strip()
+        if cls._is_windows():
+            # Only the script's own not-found exit means "not running"; any other failure
+            # (CIM unavailable, PowerShell error) is an error, so cleanup fails closed.
+            if result.returncode == _PS_NOT_FOUND:
+                return False, ""
+            if result.returncode != 0:
+                raise subprocess.SubprocessError(
+                    result.stderr.strip() or f"process lookup failed with exit code {result.returncode}"
+                )
+            return True, command.casefold()
+        return result.returncode == 0, command
+
+    @classmethod
+    def _collector_paths(cls, auth_dir: Path) -> tuple[str, str]:
+        """The installed collector binary and config, as they appear in its command line."""
+        binary = str(auth_dir / ("otelcol.exe" if cls._is_windows() else "otelcol"))
+        config = str(auth_dir / "collector-config.yaml")
+        if cls._is_windows():
+            return binary.casefold(), config.casefold()
+        return binary, config
+
     @classmethod
     def _matching_collector_pid(cls, pid_file: Path, auth_dir: Path) -> tuple[Path, str] | None:
         if cls._has_symlink_component(pid_file, Path.home()):
@@ -578,19 +640,11 @@ class CleanupCommand(Command):
         try:
             content, snapshot, _ = cls._read_regular_snapshot(pid_file)
             pid = int(content.decode("ascii").strip())
-            result = subprocess.run(  # nosec B603 — fixed argv (ps), int-cast pid, no shell
-                ["ps", "-p", str(pid), "-o", "command="],
-                capture_output=True,
-                text=True,
-                timeout=5,
-                check=False,
-            )
+            running, command = cls._process_command(pid)
         except (OSError, UnicodeDecodeError, ValueError, subprocess.SubprocessError):
             return None
-        command = result.stdout.strip()
-        expected_binary = str(auth_dir / "otelcol")
-        expected_config = str(auth_dir / "collector-config.yaml")
-        if result.returncode != 0 or expected_binary not in command or expected_config not in command:
+        expected_binary, expected_config = cls._collector_paths(auth_dir)
+        if not running or expected_binary not in command or expected_config not in command:
             return None
         return pid_file, snapshot[-1]
 
@@ -602,28 +656,19 @@ class CleanupCommand(Command):
             pid = int(pid_file.read_text(encoding="utf-8").strip())
         except (OSError, ValueError):
             return False
-        if os.name == "nt":
-            console.print("[yellow]Cannot verify collector process identity on Windows; leaving it running.[/yellow]")
-            return False
         try:
-            result = subprocess.run(  # nosec B603 — fixed argv (ps), int-cast pid, no shell
-                ["ps", "-p", str(pid), "-o", "command="],
-                capture_output=True,
-                text=True,
-                timeout=5,
-                check=False,
-            )
-            command = result.stdout.strip()
-            if result.returncode != 0:
+            running, command = self._process_command(pid)
+            if not running:
                 if self._unlink_digest_matched(pid_file, expected_digest, Path.home()):
                     console.print(f"✓ Removed stale collector PID file {pid_file}")
                     return True
                 console.print("[yellow]Collector exited, but its PID file changed; preserving it.[/yellow]")
                 return False
-            if "otelcol" not in command or str(auth_dir) not in command:
+            expected_binary, expected_config = self._collector_paths(auth_dir)
+            if expected_binary not in command or expected_config not in command:
                 console.print("[yellow]PID does not identify the gip collector; leaving it running.[/yellow]")
                 return False
-            os.kill(pid, 15)
+            self._stop_process(pid, auth_dir)
             console.print(f"✓ Stopped collector sidecar (PID {pid})")
             if self._unlink_digest_matched(pid_file, expected_digest, Path.home()):
                 console.print(f"✓ Removed {pid_file}")
@@ -633,6 +678,36 @@ class CleanupCommand(Command):
         except (OSError, subprocess.SubprocessError):
             console.print("[yellow]Could not verify or stop the collector process.[/yellow]")
             return False
+
+    @classmethod
+    def _stop_process(cls, pid: int, auth_dir: Path) -> None:
+        """Stop the verified collector. On Windows, wait for it to exit so its .exe can be deleted.
+
+        The script's exit code says only whether the stop worked: it holds the process object,
+        so a process that exits between the stop and the wait is not reported as a failure.
+        Success is then confirmed by looking the pid up again.
+        """
+        if not cls._is_windows():
+            os.kill(pid, 15)
+            return
+        script = (
+            f"$p = Get-Process -Id {int(pid)} -ErrorAction SilentlyContinue; "
+            "if ($null -eq $p) { exit 0 }; "
+            "Stop-Process -InputObject $p -Force -ErrorAction Stop; "
+            "if (-not $p.WaitForExit(10000)) { exit 2 }; exit 0"
+        )
+        result = subprocess.run(  # nosec B603 — fixed argv, int-cast pid, no shell
+            ["powershell.exe", "-NoProfile", "-NonInteractive", "-Command", script],
+            capture_output=True,
+            timeout=30,
+            check=False,
+            encoding="utf-8",
+            errors="replace",
+        )
+        running, command = cls._process_command(pid)
+        expected_binary, _ = cls._collector_paths(auth_dir)
+        if running and expected_binary in command:
+            raise OSError(result.stderr.strip() or f"PID {pid} is still running after Stop-Process")
 
     def _update_ownership_manifest(
         self,

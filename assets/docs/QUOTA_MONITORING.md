@@ -785,11 +785,11 @@ With silent refresh enabled (default since June 2026), the credential-process au
 11:00 - Quota check BLOCKS access (user exceeded limit)
 ```
 
-The enforcement gap equals the STS session duration that the client requested, regardless of refresh_token lifetime.
+The enforcement gap equals the STS session duration that the client requested, regardless of refresh_token lifetime. For Direct STS, the federated role's `MaxSessionDuration` caps that request, and `gip deploy auth` sets it to the profile's `max_session_duration`.
 
 #### Recommendation for Tight Enforcement
 
-Reduce `max_session_duration` when blocking is enabled. This sets the duration that credential-process requests; the federated role's `MaxSessionDuration` stays at 12 hours, so a modified client can still request 12 hours:
+Reduce `max_session_duration` when blocking is enabled. It sets the duration that credential-process requests and, after `gip deploy auth`, the Direct STS role's `MaxSessionDuration`, so a modified client can't get a longer session either. Lower it in this order: update the profile (`gip init`), run `gip package` and distribute the new package, then run `gip deploy auth`. A client still on an older package requests the old duration, and STS rejects that request once the role is lowered; `gip deploy auth` prints a warning when it lowers the role. Sessions issued before the redeploy keep their expiry.
 
 | Session Duration | Enforcement Gap | Use Case |
 |------------------|-----------------|----------|
@@ -797,7 +797,7 @@ Reduce `max_session_duration` when blocking is enabled. This sets the duration t
 | 4h | Up to 4 hours | Moderate enforcement |
 | 1h (recommended) | Up to 1 hour | Strict cost control |
 
-Configure in your profile:
+`gip package` writes the value into each client's `config.json`:
 
 ```json
 {
@@ -810,7 +810,7 @@ Configure in your profile:
 }
 ```
 
-**Trade-off**: Shorter sessions mean more frequent re-authentication prompts for users, but provide tighter quota enforcement.
+**Trade-off**: Shorter sessions mean more frequent credential renewals, but provide tighter quota enforcement. Renewals are silent while a cached ID token or refresh token is valid; otherwise the user signs in again in the browser.
 
 ## Sidecar Bypass Detection
 
@@ -947,13 +947,14 @@ Per allowed Bedrock region, an optional stack (`quota-metering.yaml`) deploys:
    singleton, all five data-delivery options are OFF, so its records retain
    metering metadata without prompt or completion bodies. If a per-account,
    per-region configuration already exists, the stack fails closed unless
-   `AdoptExistingConfig=true`. Before attaching a subscription filter, adoption
-   verifies that Bedrock's text, image, embedding, video, and audio data-delivery
-   flags are all disabled. A content-bearing configuration is rejected without
-   modification; a metadata-only configuration is preserved unchanged.
-   `gip deploy metering` doesn't pass `AdoptExistingConfig` yet, so adoption
-   currently needs a hand-run CloudFormation deploy of the packaged template; a
-   later `gip deploy metering` against an adopted configuration is untested. If
+   `AdoptExistingConfig=true`, which `gip deploy metering` passes when the
+   profile sets `metering_adopt_existing_config` (see
+   [Adopting an existing logging configuration](#adopting-an-existing-logging-configuration)).
+   Before attaching a subscription filter, adoption verifies that the
+   configuration delivers to CloudWatch Logs and that Bedrock's text, image,
+   embedding, video, and audio data-delivery flags are all disabled. A
+   content-bearing configuration is rejected without modification; a
+   metadata-only configuration is preserved unchanged. If
    your existing configuration delivers prompt or response content, run the
    sample in a dedicated inference account, or skip server-side metering and use
    CUR 2.0 IAM-principal cost allocation for per-user cost after the fact
@@ -995,6 +996,41 @@ inference, invocation logs stay in the **source** region, so instrumenting
 `allowed_bedrock_regions` gives full coverage. Profiles without
 `allowed_bedrock_regions` set are metered in the primary region only — narrow
 the region list for full coverage.
+
+### Adopting an existing logging configuration
+
+Use adoption only when the account already has a metadata-only invocation
+logging configuration that delivers to CloudWatch Logs. Set it in the answers
+file, or answer Yes to the `gip init` question that appears when metering and
+quota monitoring are enabled (default No, or the current value on a re-run):
+
+```yaml
+metering:
+  enabled: true
+  adopt_existing_config: true   # profile field metering_adopt_existing_config, default false
+```
+
+`gip deploy metering` then passes `AdoptExistingConfig=true` to the stack in
+every metered region. What the stack does:
+
+| Event | Behavior |
+| --- | --- |
+| Create, a configuration exists (delivering anywhere but `/aws/bedrock/gip-metering`) | Leaves the configuration unchanged and subscribes the metering processor to its log group. Fails without changing anything if a data-delivery flag is on or there is no CloudWatch Logs destination. |
+| Create, no configuration | Creates and owns a metadata-only configuration, as it does without adoption. |
+| Update, setting unchanged | The custom resource's properties don't change, so CloudFormation doesn't call it and the configuration isn't checked again. |
+| Update, setting turned off after adopting | Fails and rolls back: the stack won't overwrite the adopted configuration. |
+| Delete (`gip destroy metering`) | Removes the subscription filter and the stack's own log group, which adoption leaves unused. The adopted configuration and its log group stay in place. A configuration the stack created itself is deleted. |
+
+The content check runs only when CloudFormation creates or updates the custom
+resource. If someone later turns on content delivery in the adopted
+configuration, the stack doesn't notice: the processor then receives records
+with prompt and response content, and a failed batch keeps them in the
+metering DLQ (14-day retention). The adopted log group also needs a free
+subscription filter slot (CloudWatch Logs allows 5 per log group). If you
+adopted with a hand-run CloudFormation deploy before this setting existed, set
+it before the next `gip deploy metering`: when it's off, gip omits the
+parameter, CloudFormation uses the template default (`false`), and the update
+fails as in the "setting turned off after adopting" row.
 
 ### Shadow vs Max Mode
 

@@ -1,12 +1,9 @@
-//go:build !windows
-
-// ABOUTME: Starts the local OTEL collector sidecar (~/gip/otelcol) when this install
-// ABOUTME: is in sidecar mode and no collector from an earlier invocation is running.
+// ABOUTME: Starts the local OTEL collector sidecar (~/gip/otelcol, %USERPROFILE%\gip\otelcol.exe on
+// ABOUTME: Windows) when this install is in sidecar mode and no collector from an earlier invocation is running.
 
 package main
 
 import (
-	"errors"
 	"fmt"
 	"net"
 	"os"
@@ -14,14 +11,14 @@ import (
 	"slices"
 	"strconv"
 	"strings"
-	"syscall"
 	"time"
 
 	"gip-go/internal/proc"
 )
 
-// File names shared with install.sh, otel-helper.sh, the Python otel helper,
-// `gip cleanup` and `gip status`. The binary, config and pid file live in
+// File names shared with install.sh, install.bat, otel-helper.sh, otel-helper.ps1,
+// the Python otel helper, `gip cleanup` and `gip status`. On Windows the binary is
+// collectorBinaryName plus collectorBinarySuffix (otelcol.exe). The binary, config and pid file live in
 // ~/gip; the log and the start lock live in ~/.gip-session, so ~/gip holds
 // nothing the ownership manifest and `gip cleanup` don't know about.
 const (
@@ -37,6 +34,12 @@ const (
 	// `otel-helper --proxy` also binds (127.0.0.1:4318).
 	defaultReceiverAddress = "localhost:4318"
 	receiverDialTimeout    = 250 * time.Millisecond
+	// receiverFallbackDelay starts the second address family well inside the
+	// timeout. "localhost" resolves to ::1 before 127.0.0.1 on Windows, the
+	// collector listens on 127.0.0.1 only, and Windows retries a refused
+	// loopback connect instead of failing fast, so with Go's default 300 ms
+	// fallback the IPv4 attempt would never start within receiverDialTimeout.
+	receiverFallbackDelay = 25 * time.Millisecond
 
 	// collectorStartGrace is how long a live pid in collector.pid counts as a
 	// collector that is still starting while nothing answers on its receiver
@@ -67,7 +70,7 @@ func ensureCollector(profile string) {
 	}
 }
 
-// startCollectorIfNeeded starts installDir/otelcol with installDir/collector-config.yaml
+// startCollectorIfNeeded starts installDir/otelcol (otelcol.exe on Windows) with installDir/collector-config.yaml
 // when both exist (sidecar mode) and collectorStartBlocked finds no reason not to.
 // Central-mode and IDC zero-binary installs have no otelcol, so this is a no-op
 // for them.
@@ -81,7 +84,7 @@ func ensureCollector(profile string) {
 // An exclusive lock on sessionDir/collector.lock makes concurrent invocations
 // (several Claude Code sessions starting at once) start at most one collector.
 func startCollectorIfNeeded(installDir, sessionDir, profile string) (bool, int, error) {
-	binary := filepath.Join(installDir, collectorBinaryName)
+	binary := filepath.Join(installDir, collectorBinaryName+collectorBinarySuffix)
 	config := filepath.Join(installDir, collectorConfigName)
 	if !isExecutableFile(binary) || !isRegularFile(config) {
 		return false, 0, nil
@@ -101,12 +104,12 @@ func startCollectorIfNeeded(installDir, sessionDir, profile string) (bool, int, 
 		return false, 0, err
 	}
 	defer lock.Close()
-	if err := syscall.Flock(int(lock.Fd()), syscall.LOCK_EX|syscall.LOCK_NB); err != nil {
-		if errors.Is(err, syscall.EWOULDBLOCK) {
-			return false, 0, nil // another invocation is starting it right now
-		}
+	if acquired, err := tryLockExclusive(lock); err != nil {
 		return false, 0, err
+	} else if !acquired {
+		return false, 0, nil // another invocation is starting it right now
 	}
+	defer unlock(lock)
 	// Re-check under the lock: the invocation that held it may have started one.
 	if reason := collectorStartBlocked(pidFile, receiverAddr); reason != "" {
 		debugPrint("Not starting the collector sidecar: %s", reason)
@@ -120,7 +123,7 @@ func startCollectorIfNeeded(installDir, sessionDir, profile string) (bool, int, 
 	defer logFile.Close()
 
 	pid, err := proc.StartBackground(binary, []string{binary, "--config", config},
-		collectorEnv(os.Environ(), profile), installDir, logFile)
+		collectorEnv(os.Environ(), profile), collectorWorkDir(installDir, sessionDir), logFile)
 	if err != nil {
 		return false, 0, err
 	}
@@ -156,7 +159,7 @@ func collectorEnv(environ []string, profile string) []string {
 	env := make([]string, 0, len(environ)+1)
 	for _, kv := range environ {
 		name, _, _ := strings.Cut(kv, "=")
-		if !drop[name] {
+		if !drop[envNameKey(name)] {
 			env = append(env, kv)
 		}
 	}
@@ -185,9 +188,11 @@ func collectorStartBlocked(pidFile, receiverAddr string) string {
 	return ""
 }
 
-// receiverAnswers reports whether a TCP connection to addr succeeds.
+// receiverAnswers reports whether a TCP connection to addr succeeds on any of
+// the addresses addr resolves to.
 func receiverAnswers(addr string) bool {
-	conn, err := net.DialTimeout("tcp", addr, receiverDialTimeout)
+	d := net.Dialer{Timeout: receiverDialTimeout, FallbackDelay: receiverFallbackDelay}
+	conn, err := d.Dial("tcp", addr)
 	if err != nil {
 		return false
 	}
@@ -211,9 +216,7 @@ func startingCollectorPID(pidFile string) (int, bool) {
 	if err != nil || pid <= 0 {
 		return 0, false
 	}
-	// Signal 0 checks existence only. EPERM means the pid exists but belongs to
-	// another user, which is not our collector.
-	return pid, syscall.Kill(pid, 0) == nil
+	return pid, processAlive(pid)
 }
 
 // collectorReceiverAddress returns receivers.otlp.protocols.http.endpoint from
@@ -284,9 +287,4 @@ func writePIDFile(path string, pid int) error {
 func isRegularFile(path string) bool {
 	info, err := os.Stat(path)
 	return err == nil && info.Mode().IsRegular()
-}
-
-func isExecutableFile(path string) bool {
-	info, err := os.Stat(path)
-	return err == nil && info.Mode().IsRegular() && info.Mode().Perm()&0o111 != 0
 }

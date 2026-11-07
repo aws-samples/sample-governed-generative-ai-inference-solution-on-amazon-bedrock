@@ -271,6 +271,42 @@ def _assert_host_os_can_build_macos() -> None:
     )
 
 
+# Tier variables each Claude Code model alias resolves through.
+_ALIAS_TIER_ENV_VARS = {
+    "sonnet": ("ANTHROPIC_DEFAULT_SONNET_MODEL",),
+    "opus": ("ANTHROPIC_DEFAULT_OPUS_MODEL",),
+    "opusplan": ("ANTHROPIC_DEFAULT_OPUS_MODEL", "ANTHROPIC_DEFAULT_SONNET_MODEL"),
+    "haiku": ("ANTHROPIC_DEFAULT_HAIKU_MODEL",),
+    "fable": ("ANTHROPIC_DEFAULT_FABLE_MODEL",),
+}
+
+
+def _model_lock_allowlist(env: dict[str, str]) -> list[str]:
+    """Return the availableModels entries that lock Claude Code to its packaged default.
+
+    On Amazon Bedrock, Claude Code matches allowlist entries against the
+    provider-form ID a pinned alias resolves to: CRIS prefixes such as `us.`
+    are not stripped and an Application Inference Profile ARN has no family
+    name, so a bare alias such as `sonnet` does not cover an ARN pin. The list
+    therefore names the exact values of the tier variables the default alias
+    uses, then the Haiku-tier pin that carries background work. The first
+    entry is the default model, because enforceAvailableModels resolves the
+    Default option to the first allowed, available entry.
+    """
+    default = env.get("ANTHROPIC_MODEL")
+    if not default:
+        return []
+    tier_vars = _ALIAS_TIER_ENV_VARS.get(default)
+    if tier_vars is None:
+        entries = [default]  # a full model ID rather than an alias
+    else:
+        # An unpinned tier falls back to the alias, which Claude Code matches
+        # against its own built-in ID for that family.
+        entries = [env.get(var) or default for var in tier_vars]
+    entries.append(env.get("ANTHROPIC_DEFAULT_HAIKU_MODEL"))
+    return list(dict.fromkeys(entry for entry in entries if entry))
+
+
 class PackageCommand(Command):
     """
     Build distribution packages for your organization
@@ -1348,8 +1384,8 @@ class PackageCommand(Command):
         Produces otelcol-{os}-{arch} binaries that are shipped IN the package, the same
         model as credential-process and otel-helper. distribute.py, test.py and status.py
         expect these bundled binaries to exist, and the installed otel-helper starts
-        ~/gip/otelcol on macOS/Linux (Go: cmd/otel-helper/collector.go) and Windows
-        (otel-helper.ps1).
+        ~/gip/otelcol on macOS/Linux and %USERPROFILE%\\gip\\otelcol.exe on Windows
+        (Go: cmd/otel-helper/collector.go; otel-helper.ps1 when otel-helper.cmd falls back to it).
 
         Network + Go 1.23+ are required on the PACKAGING (admin) machine only — end users
         never download the collector. Skips gracefully when Go is missing or too old.
@@ -4105,7 +4141,11 @@ if [ -d "gip-settings" ]; then
             echo "WARNING: Some path placeholders were not replaced in managed-settings.json"
         else
             echo "OK Managed settings installed: $MANAGED_DIR/managed-settings.json"
-            echo "   These settings have highest precedence; user settings can't override them."
+            echo "   These settings have highest precedence in Claude Code: user and project settings can't override them."
+            if grep -q '"availableModels"' "$MANAGED_TARGET" 2>/dev/null; then
+                echo "   Model selection is restricted to the availableModels list in this file (Claude Code v2.1.175 or later)."
+            fi
+            echo "   They bind Claude Code only, and a local administrator can still edit this file."
         fi
     fi
 
@@ -4989,6 +5029,15 @@ if ($InstallAll) {
         $stagedPaths += $manifestStaged
         $entries += [PSCustomObject]@{ Target = $manifestPath; Staged = $manifestStaged; ExpectedDigest = $manifestExpected }
 
+        # The Go otel-helper keeps the sidecar collector running. Stop the installed
+        # one (matched by its full path) before replacing files, so the upgrade can
+        # replace otelcol.exe and its config; the next otel-helper call restarts it.
+        if ($installCollector) {
+            $collectorTarget = [IO.Path]::GetFullPath((Join-Path $install "otelcol.exe"))
+            Get-Process -Name otelcol -ErrorAction SilentlyContinue |
+                Where-Object { $_.Path -and [IO.Path]::GetFullPath($_.Path) -ieq $collectorTarget } |
+                Stop-Process -Force -ErrorAction SilentlyContinue
+        }
         Invoke-GipFileTransaction $entries
     } finally {
         foreach ($path in $stagedPaths) { Remove-Item -LiteralPath $path -Force -ErrorAction SilentlyContinue }
@@ -5304,7 +5353,6 @@ exit 0
         # (The registry path that points AT this .cmd is the one that must be
         # absolute — Claude reads it literally — handled via __GIP_HOME__ in the
         # .reg, resolved by the cowork-3p.reg substitution block below.)
-        windows_websearch_block = ""
         windows_websearch_post_block = ""
         _ws_enabled = getattr(profile, "web_search_enabled", False)
         _ws_auth = getattr(profile, "effective_auth_type", getattr(profile, "auth_type", "oidc"))
@@ -5345,22 +5393,6 @@ if %errorlevel% equ 0 (
 )
 """
             windows_websearch_post_block = windows_claude_mcp_block
-            windows_websearch_block = f"""
-REM Web search headersHelper (Cowork web search via AgentCore Gateway).
-REM Emits {{"Authorization":"Bearer <id_token>"}} via the browserless
-REM --get-mcp-auth-header mode, bound to the '{profile.name}' profile.
-echo Installing web search headersHelper...
-set "GIP_WS_SOURCE=%TEMP%\\gip-websearch-!RANDOM!-!RANDOM!.cmd"
-(
-echo @echo off
-echo "%USERPROFILE%\\gip\\credential-process.exe" --profile {profile.name} --get-mcp-auth-header
-) > "!GIP_WS_SOURCE!"
-powershell -NoProfile -ExecutionPolicy Bypass -File "%~dp0gip-install.ps1" -InstallFile -Source "!GIP_WS_SOURCE!" -RelativeTarget "gip\\websearch-headers.cmd" -ManifestKey "gip/websearch-headers.cmd"
-set "GIP_WS_STATUS=!errorlevel!"
-del /q "!GIP_WS_SOURCE!" >nul 2>&1
-if not "!GIP_WS_STATUS!"=="0" exit /b 1
-echo OK Web search headersHelper installed
-{windows_claude_mcp_block}"""
 
         installer_content = f"""@echo off
 SETLOCAL ENABLEDELAYEDEXPANSION
@@ -5408,169 +5440,6 @@ if exist "%USERPROFILE%\\gip\\.gip-ownership.json" (
     if !errorlevel! neq 0 exit /b 1
 )
 
-REM Create directory
-echo Installing authentication tools...
-if not exist "%USERPROFILE%\\gip" mkdir "%USERPROFILE%\\gip"
-
-REM Copy credential process executable with renamed target
-echo Copying credential process...
-powershell -NoProfile -ExecutionPolicy Bypass -File "%~dp0gip-install.ps1" -InstallFile -Source "%~dp0credential-process-windows.exe" -RelativeTarget "gip\\credential-process.exe" -ManifestKey "gip/credential-process.exe"
-if %errorlevel% neq 0 (
-    echo ERROR: Failed to copy credential-process-windows.exe
-    exit /b 1
-)
-{windows_websearch_block}
-REM Copy OTEL helper if it exists with renamed target
-if exist "otel-helper-windows.exe" (
-    echo Copying OTEL helper...
-    powershell -NoProfile -ExecutionPolicy Bypass -File "%~dp0gip-install.ps1" -InstallFile -Source "%~dp0otel-helper-windows.exe" -RelativeTarget "gip\\otel-helper.exe" -ManifestKey "gip/otel-helper.exe"
-    if !errorlevel! neq 0 (
-        echo ERROR: Failed to copy otel-helper-windows.exe
-        exit /b 1
-    )
-)
-
-REM Copy the OTEL helper wrapper (.cmd) and its PowerShell fallback (.ps1).
-REM Claude Code's otelHeadersHelper points at otel-helper.cmd, which runs the
-REM fast .exe and falls back to the .ps1 if antivirus blocks the binary. When
-REM monitoring is enabled these files are REQUIRED — a missing .cmd makes Claude
-REM Code fail every telemetry export with "is not recognized as an internal or
-REM external command" and silently drops all metrics, so we fail the install
-REM loudly rather than leave a broken telemetry config.
-if exist "otel-helper.cmd" (
-    powershell -NoProfile -ExecutionPolicy Bypass -File "%~dp0gip-install.ps1" -InstallFile -Source "%~dp0otel-helper.cmd" -RelativeTarget "gip\\otel-helper.cmd" -ManifestKey "gip/otel-helper.cmd"
-    if !errorlevel! neq 0 (
-        echo ERROR: Failed to copy otel-helper.cmd
-        exit /b 1
-    )
-) else (
-    echo {"ERROR" if _otel_missing_is_fatal else "INFO"}: otel-helper.cmd not found in package.
-{
-            '''    echo        Claude Code needs it to send telemetry [otelHeadersHelper].
-    echo        Re-extract the full package [including .cmd and .ps1 files] and retry.
-    exit /b 1'''
-            if _otel_missing_is_fatal
-            else "    REM Monitoring disabled - helper not required."
-        }
-)
-if exist "otel-helper.ps1" (
-    powershell -NoProfile -ExecutionPolicy Bypass -File "%~dp0gip-install.ps1" -InstallFile -Source "%~dp0otel-helper.ps1" -RelativeTarget "gip\\otel-helper.ps1" -ManifestKey "gip/otel-helper.ps1"
-    if !errorlevel! neq 0 (
-        echo ERROR: Failed to copy otel-helper.ps1
-        exit /b 1
-    )
-) else (
-    echo {"ERROR" if _otel_missing_is_fatal else "INFO"}: otel-helper.ps1 not found in package.
-{
-            '''    echo        It is the antivirus fallback for otel-helper.cmd and is required.
-    echo        Re-extract the full package and run install.bat again.
-    exit /b 1'''
-            if _otel_missing_is_fatal
-            else "    REM Monitoring disabled - fallback not required."
-        }
-)
-
-REM Install OTEL Collector sidecar (sidecar-mode packages only). otelcol is built
-REM via OCB and SHIPPED in the package as otelcol-windows.exe (same model as the
-REM other binaries) — never downloaded at install time. otel-helper.ps1 launches it
-REM from %USERPROFILE%\\gip\\otelcol.exe under the
-REM <profile>-collector AWS profile created below.
-if exist "collector-config.yaml" (
-    if exist "otelcol-windows.exe" (
-        echo Installing OTEL Collector sidecar...
-        powershell -NoProfile -ExecutionPolicy Bypass -File "%~dp0gip-install.ps1" -InstallFile -Source "%~dp0otelcol-windows.exe" -RelativeTarget "gip\\otelcol.exe" -ManifestKey "gip/otelcol.exe"
-        if !errorlevel! neq 0 (
-            echo ERROR: Failed to copy otelcol-windows.exe
-            exit /b 1
-        )
-        powershell -NoProfile -ExecutionPolicy Bypass -File "%~dp0gip-install.ps1" -InstallFile -Source "%~dp0collector-config.yaml" -RelativeTarget "gip\\collector-config.yaml" -ManifestKey "gip/collector-config.yaml"
-        if !errorlevel! neq 0 (
-            echo ERROR: Failed to copy collector-config.yaml
-            exit /b 1
-        )
-        REM Unblock the downloaded binary so SmartScreen doesn't block subprocess launch
-        powershell -NoProfile -Command "Get-ChildItem '%USERPROFILE%\\gip\\otelcol.exe' | Unblock-File" >nul 2>&1
-        echo OK OTEL Collector sidecar installed
-    ) else (
-        echo WARNING: Sidecar config present but otelcol-windows.exe is missing.
-        echo          The admin must run 'gip package' with Go 1.23+ to build the collector.
-        echo          Telemetry will not be forwarded until the collector is installed.
-    )
-)
-
-REM Copy configuration
-echo Copying configuration...
-powershell -NoProfile -ExecutionPolicy Bypass -File "%~dp0gip-install.ps1" -InstallFile -Source "%~dp0config.json" -RelativeTarget "gip\\config.json" -ManifestKey "gip/config.json"
-if !errorlevel! neq 0 (
-    echo ERROR: Failed to copy config.json
-    exit /b 1
-)
-
-REM Copy Claude Code settings if they exist
-if exist "gip-settings" (
-    echo Copying Claude Code telemetry settings...
-    if not exist "%USERPROFILE%\\.claude" mkdir "%USERPROFILE%\\.claude"
-
-    REM Install managed-settings.json (organization-wide enforcement) if present
-    if exist "gip-settings\\managed-settings.json" (
-        echo Managed settings detected [organization-wide enforcement]...
-
-        REM Elevate only the system-scoped write. The full installer remains
-        REM unelevated so user paths cannot redirect administrator writes.
-        powershell -NoProfile -Command "$script = (Join-Path (Get-Location) 'gip-install.ps1').Replace('''',''''''); $home = $env:USERPROFILE.Replace('''',''''''); $command = \"& '$script' -InstallManaged -UserHome '$home'\"; $encoded = [Convert]::ToBase64String([Text.Encoding]::Unicode.GetBytes($command)); $p = Start-Process -FilePath powershell.exe -Verb RunAs -Wait -PassThru -ArgumentList @('-NoProfile','-EncodedCommand',$encoded); exit $p.ExitCode"
-        if !errorlevel! neq 0 (
-            echo ERROR: Managed settings were not installed.
-            exit /b 1
-        )
-        echo OK Managed settings installed: C:\\Program Files\\ClaudeCode\\managed-settings.json
-        echo    These settings have highest precedence; user settings can't override them.
-    )
-
-    REM Copy user-scope settings.json only when absent or manifest-owned.
-    if exist "gip-settings\\settings.json" (
-        set WRITE_SETTINGS=false
-        if exist "%USERPROFILE%\\.claude\\settings.json" (
-            if "!GIP_SETTINGS_CREATED!"=="1" (
-                set WRITE_SETTINGS=true
-            ) else (
-                echo WARNING: Preserving existing foreign Claude Code settings.
-                echo          Review gip-settings\\settings.json and merge its Bedrock keys manually.
-            )
-        ) else (
-            set WRITE_SETTINGS=true
-            set GIP_SETTINGS_CREATED=1
-        )
-
-        if "!WRITE_SETTINGS!"=="true" (
-            set "GIP_SETTINGS_SOURCE=%TEMP%\\gip-settings-!RANDOM!-!RANDOM!.json"
-            powershell -NoProfile -Command "$ErrorActionPreference = 'Stop'; $otelPath = ($env:USERPROFILE + '\\gip\\otel-helper.cmd').Replace('\\','\\\\'); $credPath = $env:USERPROFILE + '\\gip\\credential-process.exe' -replace '\\\\', '/'; $content = (Get-Content 'gip-settings\\settings.json' -Raw) -replace '__OTEL_HELPER_PATH__', $otelPath -replace '__CREDENTIAL_PROCESS_PATH__', $credPath; [IO.File]::WriteAllText($env:GIP_SETTINGS_SOURCE, $content, (New-Object Text.UTF8Encoding($false)))"
-            if !errorlevel! neq 0 (
-                echo ERROR: Failed to prepare Claude Code settings.
-                del /q "!GIP_SETTINGS_SOURCE!" >nul 2>&1
-                exit /b 1
-            )
-            powershell -NoProfile -ExecutionPolicy Bypass -File "%~dp0gip-install.ps1" -InstallFile -Source "!GIP_SETTINGS_SOURCE!" -RelativeTarget ".claude\\settings.json" -ManifestKey ".claude/settings.json"
-            set "GIP_SETTINGS_STATUS=!errorlevel!"
-            del /q "!GIP_SETTINGS_SOURCE!" >nul 2>&1
-            if not "!GIP_SETTINGS_STATUS!"=="0" (
-                echo ERROR: Failed to install Claude Code settings.
-                exit /b 1
-            )
-            echo OK Claude Code settings configured
-        )
-    )
-)
-
-REM Configure AWS profiles
-echo.
-echo Configuring AWS profiles...
-powershell -NoProfile -ExecutionPolicy Bypass -File "%~dp0gip-install.ps1" -ConfigureAws
-if !errorlevel! neq 0 (
-    echo ERROR: Failed to configure AWS profiles transactionally.
-    exit /b 1
-)
-echo   OK AWS profiles configured
-
 """
 
         install_all_flags = []
@@ -5581,15 +5450,6 @@ echo   OK AWS profiles configured
         if _ws_enabled and _ws_auth != "idc":
             install_all_flags.extend(("-WebSearchProfile", f'"{profile.name}"'))
         install_all_arguments = " ".join(install_all_flags)
-        # Known limitation: on Windows nothing starts otelcol.exe in the normal path
-        # (the Go otel-helper's collector launcher is a no-op there, and otel-helper.cmd
-        # reaches otel-helper.ps1, which starts it, only when otel-helper.exe fails).
-        windows_sidecar_warning = (
-            "echo WARNING: Known limitation on Windows: the sidecar collector is not started "
-            "automatically, so Claude Code usage does not reach CloudWatch. Ask your administrator."
-            if profile.monitoring_enabled and getattr(profile, "monitoring_mode", "central") == "sidecar"
-            else ""
-        )
         if _otel_missing_is_fatal:
             installer_content = installer_content.replace(
                 'powershell -NoProfile -ExecutionPolicy Bypass -File "%~dp0gip-install.ps1"',
@@ -5597,7 +5457,7 @@ echo   OK AWS profiles configured
                 1,
             )
         installer_content = (
-            installer_content[: installer_content.index("REM Create directory")]
+            installer_content
             + f"""
 echo Installing authentication tools and AWS profiles transactionally...
 powershell -NoProfile -ExecutionPolicy Bypass -File "%~dp0gip-install.ps1" -InstallAll {install_all_arguments}
@@ -5616,13 +5476,16 @@ if exist "gip-settings\\managed-settings.json" (
         echo ERROR: User files were installed, but managed settings were not updated.
         exit /b 1
     )
+    echo OK Managed settings installed: C:\\Program Files\\ClaudeCode\\managed-settings.json
+    echo    These settings have highest precedence in Claude Code: user and project settings can't override them.
+    findstr /C:"availableModels" "gip-settings\\managed-settings.json" >nul 2>&1 && echo    Model selection is restricted to the availableModels list in this file - needs Claude Code v2.1.175 or later.
+    echo    They bind Claude Code only, and a local administrator can still edit this file.
 )
 
 if exist "%USERPROFILE%\\gip\\otelcol.exe" (
     powershell -NoProfile -Command "Get-ChildItem '%USERPROFILE%\\gip\\otelcol.exe' | Unblock-File" >nul 2>&1
     if !errorlevel! neq 0 exit /b 1
 )
-{windows_sidecar_warning}
 {windows_websearch_post_block}
 """
         )
@@ -6021,6 +5884,11 @@ Available metrics include:
             # For user-scope settings: always write (users can override via /model).
             settings_target = getattr(profile, "settings_target", "user")
             lock_model = getattr(profile, "lock_default_model", False)
+            # restrict_model_selection adds the allowlist on top of the managed default. It is a
+            # no-op without managed scope or without lock_default_model.
+            restrict_models = bool(
+                settings_target == "managed" and lock_model and getattr(profile, "restrict_model_selection", False)
+            )
             should_write_model = (
                 hasattr(profile, "selected_model")
                 and profile.selected_model
@@ -6054,6 +5922,17 @@ Available metrics include:
                 if opus_model:
                     settings["env"]["ANTHROPIC_DEFAULT_OPUS_MODEL"] = opus_model
 
+                # The model restriction keeps Claude Code on the version selected in
+                # `gip init`, so pin the default alias's tier to it rather than
+                # to the newest model in the tier (Opus 4.6 selected must not
+                # restrict users to Opus 4.8). For opusplan this is the Opus tier.
+                # An AIP override for that tier still replaces the pin below.
+                if restrict_models and alias in _ALIAS_TIER_ENV_VARS:
+                    default_tier_var = _ALIAS_TIER_ENV_VARS[alias][0]
+                    settings["env"][default_tier_var] = profile.selected_model
+                    if default_tier_var == "ANTHROPIC_DEFAULT_HAIKU_MODEL":
+                        settings["env"]["ANTHROPIC_SMALL_FAST_MODEL"] = profile.selected_model
+
             # Application Inference Profile (AIP) overrides provide
             # admin-managed team/cost-center attribution. They replace CRIS
             # tier defaults, while ANTHROPIC_MODEL keeps its alias so Claude
@@ -6068,6 +5947,15 @@ Available metrics include:
                 if aip_arn:
                     for env_var in env_vars:
                         settings["env"][env_var] = aip_arn
+
+            # Model restriction: a managed ANTHROPIC_MODEL is only a default, so
+            # restrict_model_selection limits selection with availableModels and keeps
+            # /model's Default option inside the list with enforceAvailableModels.
+            if should_write_model and restrict_models:
+                allowed = _model_lock_allowlist(settings["env"])
+                if allowed:
+                    settings["availableModels"] = allowed
+                    settings["enforceAvailableModels"] = True
 
             # If monitoring is enabled, add telemetry configuration
             if profile.monitoring_enabled:

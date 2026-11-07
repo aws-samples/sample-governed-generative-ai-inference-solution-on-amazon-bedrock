@@ -45,9 +45,13 @@ class Profile:
     cross_region_profile: str | None = None  # Cross-region profile: "us", "europe", "apac"
     selected_model: str | None = None  # Selected Claude model ID (e.g., "us.anthropic.claude-3-7-sonnet-20250805-v1:0")
     model_alias: str | None = None  # Claude Code alias for ANTHROPIC_MODEL: "sonnet", "opus", "opusplan", "haiku"
-    lock_default_model: bool = (
-        False  # Write ANTHROPIC_MODEL + DEFAULT_*_MODEL into managed-settings (a default, not a lock)
-    )
+    # Managed settings only: write ANTHROPIC_MODEL + DEFAULT_*_MODEL into managed-settings
+    # (a default, not a lock).
+    lock_default_model: bool = False
+    # Managed settings + lock_default_model only: also pin the default tier to selected_model
+    # and write availableModels + enforceAvailableModels, restricting Claude Code to that model
+    # and the Haiku tier. Binds Claude Code only; IAM stays the model/Region boundary.
+    restrict_model_selection: bool = False
     selected_source_region: str | None = None  # User-selected source region for AWS config and Claude Code settings
     created_at: str = field(default_factory=lambda: datetime.now(timezone.utc).isoformat())
     updated_at: str = field(default_factory=lambda: datetime.now(timezone.utc).isoformat())
@@ -132,6 +136,9 @@ class Profile:
     # (config-sync.md), following the gateway_* precedent.
     metering_enabled: bool = False  # Enable server-side usage metering from Bedrock invocation logs
     metering_mode: str = "shadow"  # "shadow" (collect + reconcile only) or "max" (enforce on max(client, server))
+    # Pass AdoptExistingConfig=true to quota-metering.yaml: attach to an existing
+    # metadata-only invocation-logging configuration instead of failing closed.
+    metering_adopt_existing_config: bool = False
 
     # Model lifecycle alerts (model-lifecycle stack, opt-in, default off, ~$0/mo).
     # Daily Lambda joins ListFoundationModels lifecycle dates against the models
@@ -149,6 +156,9 @@ class Profile:
     guardrails_enabled: bool = False
     guardrails_name: str = ""  # Empty derives <identity_pool_name>-guardrail, truncated to Bedrock's 50-char max.
     guardrails_content_filter_strength: str = "MEDIUM"  # LOW | MEDIUM | HIGH
+    # CLASSIC | STANDARD. STANDARD uses cross-Region guardrail inference: prompts and responses
+    # can be evaluated in other Regions of the guardrail profile's geography.
+    guardrails_safeguard_tier: str = "CLASSIC"
     guardrails_model_include_list: list[str] = field(default_factory=list)  # Empty = enforce all models in the region
     guardrails_kms_key_arn: str | None = None
 
@@ -209,7 +219,8 @@ class Profile:
 
     # Settings deployment target
     # "user" = ~/.claude/settings.json (default, lowest precedence)
-    # "managed" = OS-level managed-settings.json (highest precedence; user settings can't override it)
+    # "managed" = OS-level managed-settings.json (highest precedence in Claude Code; binds Claude
+    #             Code only, and a local administrator can still edit the file)
     settings_target: str = "user"
 
     # Claude Cowork 3P MDM configuration
@@ -448,6 +459,7 @@ class Profile:
                 "guardrails_content_filter_strength",
                 guardrails.get("content_filter_strength", "MEDIUM"),
             )
+            data.setdefault("guardrails_safeguard_tier", guardrails.get("safeguard_tier") or "CLASSIC")
             data.setdefault("guardrails_model_include_list", guardrails.get("model_include_list") or [])
             data.setdefault("guardrails_kms_key_arn", guardrails.get("kms_key_arn") or None)
 

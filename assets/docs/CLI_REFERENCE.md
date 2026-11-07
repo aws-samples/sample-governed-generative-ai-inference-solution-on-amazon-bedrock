@@ -81,7 +81,7 @@ poetry run gip init [options]
 **Options:**
 
 - `--profile <name>` - Configuration profile name (optional, will prompt if not specified)
-- `--managed` - Deploy settings to OS-level managed-settings.json (highest precedence: user and project settings can't override it; binds Claude Code only, and local administrators can still edit the file)
+- `--managed` - Deploy settings to OS-level managed-settings.json (highest precedence: user and project settings can't override it; binds Claude Code only, and local administrators can still edit the file). The wizard then asks whether to set the default model for all users (`lock_default_model`, a default, not a lock) and, after a yes, whether to also restrict Claude Code to the model you select (`restrict_model_selection`, which writes `availableModels` and `enforceAvailableModels` and needs Claude Code v2.1.175 or later) ([details](DEPLOYMENT.md#organization-wide-enforcement-optional))
 - `--from-file <answers.(yaml|json)>` - Create a profile non-interactively from an answers file (see [Non-interactive / GitOps mode](#non-interactive-gitops-mode))
 - `--export-answers <path>` - Export an existing profile back to an answers file (YAML or JSON, chosen by extension)
 - `--profile-name <name>` - Profile name to create with `--from-file` or export with `--export-answers` (default: `default`)
@@ -94,6 +94,7 @@ poetry run gip init [options]
 - Prompts for authentication method selection:
   - Direct IAM: Uses IAM OIDC Provider for federation
   - Cognito: Uses Cognito Identity Pool for federation
+- Prompts for the session duration (`max_session_duration`, 3600–43200 seconds). For Direct IAM, `gip deploy auth` also sets the federated role's `MaxSessionDuration` to it
 - Configures AWS settings (region, stack names)
 - Prompts for Claude model selection (Opus, Sonnet, Haiku)
 - Configures cross-region inference profiles (US, Europe, APAC)
@@ -105,6 +106,7 @@ poetry run gip init [options]
   - Daily token limit with burst buffer (auto-calculated from monthly)
   - Enforcement modes (alert vs block) for daily and monthly limits
   - Quota re-check interval (how often to verify quota with cached credentials)
+- When the profile has server-side metering and quota monitoring enabled, asks whether to adopt an existing invocation-logging configuration (`metering_adopt_existing_config`; default No, or the current value on a re-run; see [Adopting an existing logging configuration](QUOTA_MONITORING.md#adopting-an-existing-logging-configuration))
 - Prompts for Windows build support via AWS CodeBuild (optional)
 - Saves configuration to `~/.gip/config.json`
 
@@ -127,7 +129,7 @@ poetry run gip init --export-answers answers.yaml --profile-name prod
 
 **Answers file schema:** the file mirrors the wizard's internal configuration structure — the same keys the interactive wizard collects. Every field you omit takes the same default as pressing Enter through the wizard for a minimal OIDC deployment. Only two fields have no possible default and must always be provided for OIDC: `okta.domain` and `okta.client_id`.
 
-Top-level keys: `auth_type`, `sso_enabled`, `okta`, `provider_type`, `cognito_user_pool_id`, `oidc_issuer_url`, `oidc_authorization_endpoint`, `oidc_token_endpoint`, `oidc_jwks_uri`, `oidc_thumbprint`, `azure_auth_mode`, `client_certificate_path`, `client_certificate_key_path`, `credential_storage`, `redirect_port`, `federation_type`, `max_session_duration`, `idc_start_url`, `idc_account_id`, `idc_permission_set_name`, `sso_region`, `aws`, `monitoring`, `analytics`, `quota`, `metering`, `codebuild`, `guardrails`, `web_search`, `cowork_3p`, `cowork`, `settings_target`, `lock_default_model`, `distribution`, `tags`, `extra_files`.
+Top-level keys: `auth_type`, `sso_enabled`, `okta`, `provider_type`, `cognito_user_pool_id`, `oidc_issuer_url`, `oidc_authorization_endpoint`, `oidc_token_endpoint`, `oidc_jwks_uri`, `oidc_thumbprint`, `azure_auth_mode`, `client_certificate_path`, `client_certificate_key_path`, `credential_storage`, `redirect_port`, `federation_type`, `max_session_duration`, `idc_start_url`, `idc_account_id`, `idc_permission_set_name`, `sso_region`, `aws`, `monitoring`, `analytics`, `quota`, `metering`, `codebuild`, `guardrails`, `web_search`, `cowork_3p`, `cowork`, `settings_target`, `lock_default_model`, `restrict_model_selection`, `distribution`, `tags`, `extra_files`.
 
 Complete example — minimal Okta deployment with cost-based quota:
 
@@ -159,6 +161,7 @@ quota:
 metering:
   enabled: true                  # requires quota.enabled: true
   mode: shadow                   # "shadow" or "max"
+  adopt_existing_config: false   # true adopts an existing metadata-only invocation-logging configuration
 
 tags:
   team: platform
@@ -240,7 +243,8 @@ poetry run gip deploy [stack] [options]
 **What it does:**
 
 - Deploys authentication infrastructure (IAM OIDC Provider or Cognito Identity Pool)
-- Creates IAM roles and policies for Bedrock access
+- Creates IAM roles and policies for Bedrock access. For Direct IAM, the role's `MaxSessionDuration` is the profile's `max_session_duration` (43200 when it is null or 0; a profile JSON without the key loads 28800); a value outside 3600–43200 stops the deploy before CloudFormation runs, and lowering it prints a warning, because clients packaged with a longer duration fail until they install a new package
+- Passes `AdoptExistingConfig=true` to the metering stacks when the profile sets `metering_adopt_existing_config`
 - Deploys monitoring infrastructure (if enabled)
 - Shows stack outputs including authentication resource identifiers
 
