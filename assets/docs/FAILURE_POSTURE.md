@@ -124,7 +124,8 @@ does not catch forged attribution.
 - **Enforcement lives at credential issuance, not inline per-request**
   ([ADR-0009](adr/0009-enforcement-at-credential-issuance.md)). This is why a
   collector or quota outage never breaks inference for holders of live STS
-  sessions, and why the enforcement gap is bounded by `max_session_duration`.
+  sessions, and why the enforcement gap is bounded by `max_session_duration`
+  (for Direct STS, the role's maximum once `gip deploy auth` has applied it).
   Customers who want inline enforcement can use Claude Apps Gateway. Its
   health, database, and spend-failure behavior is owned by the exact AWS
   Samples source pinned under `vendor/`; GIP does not add or reinterpret a

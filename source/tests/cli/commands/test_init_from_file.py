@@ -548,3 +548,140 @@ provider_type: generic
         for field in ("oidc_issuer_url", "oidc_authorization_endpoint", "oidc_token_endpoint", "oidc_jwks_uri"):
             assert field in out
         assert "oidc_thumbprint" not in out
+
+
+class TestGuardrailsSafeguardTier:
+    """guardrails.safeguard_tier: CLASSIC by default, STANDARD opt-in, round-trips through export."""
+
+    def test_standard_tier_round_trips_through_profile_and_export(self, config_paths, tester, tmp_path):
+        from governed_inference_platform.cli.commands.init_answers import build_config_from_answers, load_answers_file
+
+        answers = tmp_path / "answers.yaml"
+        answers.write_text(MINIMAL_YAML + "guardrails:\n  enabled: true\n  safeguard_tier: STANDARD\n")
+        assert tester.run(f"--from-file {answers} --profile-name ci") == 0
+        assert _load_profile(config_paths, "ci")["guardrails_safeguard_tier"] == "STANDARD"
+
+        exported = tmp_path / "exported.yaml"
+        assert tester.run(f"--export-answers {exported} --profile-name ci") == 0
+        config, errors = build_config_from_answers(load_answers_file(exported))
+        assert errors == []
+        assert config["guardrails"]["safeguard_tier"] == "STANDARD"
+
+    def test_tier_defaults_to_classic(self, config_paths, tester, tmp_path):
+        answers = tmp_path / "answers.yaml"
+        answers.write_text(MINIMAL_YAML + "guardrails:\n  enabled: true\n")
+        assert tester.run(f"--from-file {answers} --profile-name ci") == 0
+        assert _load_profile(config_paths, "ci")["guardrails_safeguard_tier"] == "CLASSIC"
+
+    def test_invalid_tier_rejected(self, config_paths, tester, tmp_path, capsys):
+        answers = tmp_path / "answers.yaml"
+        answers.write_text(MINIMAL_YAML + "guardrails:\n  enabled: true\n  safeguard_tier: premium\n")
+        assert tester.run(f"--from-file {answers} --profile-name ci") == 1
+        assert "guardrails.safeguard_tier" in capsys.readouterr().out
+
+    def test_inference_profile_id_in_include_list_rejected(self, config_paths, tester, tmp_path, capsys):
+        """Bedrock enforcement rejects us.anthropic... IDs; --from-file must catch it, not gip deploy."""
+        answers = tmp_path / "answers.yaml"
+        answers.write_text(
+            MINIMAL_YAML
+            + "guardrails:\n  enabled: true\n  model_include_list:\n    - us.anthropic.claude-haiku-4-5-20251001-v1:0\n"
+        )
+        assert tester.run(f"--from-file {answers} --profile-name ci") == 1
+        out = capsys.readouterr().out
+        assert "guardrails.model_include_list" in out and "us.anthropic.claude-haiku-4-5-20251001-v1:0" in out
+
+    def test_foundation_model_id_in_include_list_accepted(self, config_paths, tester, tmp_path):
+        answers = tmp_path / "answers.yaml"
+        answers.write_text(
+            MINIMAL_YAML
+            + "guardrails:\n  enabled: true\n  model_include_list:\n    - anthropic.claude-haiku-4-5-20251001-v1:0\n"
+        )
+        assert tester.run(f"--from-file {answers} --profile-name ci") == 0
+
+    def test_standard_tier_outside_jp_residency_rejected(self, tmp_path):
+        from governed_inference_platform.cli.commands.init_answers import build_config_from_answers
+
+        answers = {
+            "okta": {"domain": "company.okta.com", "client_id": "0oa0000000000000000"},
+            "aws": {
+                "region": "ap-northeast-1",
+                "selected_model": "jp.anthropic.claude-sonnet-4-6",
+                "cross_region_profile": "jp",
+            },
+            "guardrails": {"enabled": True, "safeguard_tier": "STANDARD"},
+        }
+        _, errors = build_config_from_answers(answers)
+        residency = [e for e in errors if e.startswith("guardrails.safeguard_tier")]
+        assert len(residency) == 1, errors
+        assert "ap-northeast-1" in residency[0] and "apac.guardrail.v1:0" in residency[0]
+        assert "ap-south-1" in residency[0] and "CLASSIC" in residency[0]
+
+        answers["guardrails"]["safeguard_tier"] = "CLASSIC"
+        assert build_config_from_answers(answers)[1] == []
+
+    def test_standard_tier_inside_eu_residency_accepted(self):
+        from governed_inference_platform.cli.commands.init_answers import build_config_from_answers
+
+        answers = {
+            "okta": {"domain": "company.okta.com", "client_id": "0oa0000000000000000"},
+            "aws": {
+                "region": "eu-west-1",
+                "selected_model": "eu.anthropic.claude-sonnet-4-6",
+                "cross_region_profile": "eu",
+                "allowed_bedrock_regions": ["eu-west-1", "eu-central-1"],
+            },
+            "guardrails": {"enabled": True, "safeguard_tier": "STANDARD"},
+        }
+        assert build_config_from_answers(answers)[1] == []
+
+
+class TestGuardrailsStandardTierPerRegion:
+    """--from-file applies the same Standard-tier hard stops as gip deploy guardrails."""
+
+    def _errors(self, aws):
+        from governed_inference_platform.cli.commands.init_answers import build_config_from_answers
+
+        answers = {
+            "okta": {"domain": "company.okta.com", "client_id": "0oa0000000000000000"},
+            "aws": aws,
+            "guardrails": {"enabled": True, "safeguard_tier": "STANDARD"},
+        }
+        return [e for e in build_config_from_answers(answers)[1] if e.startswith("guardrails.safeguard_tier")]
+
+    def test_us_default_regions_pass_with_a_classic_fallback(self):
+        assert self._errors({"region": "us-east-1", "selected_model": "us.anthropic.claude-sonnet-4-6"}) == []
+
+    def test_au_default_regions_pass(self):
+        assert self._errors({"region": "ap-southeast-2", "selected_model": "au.anthropic.claude-sonnet-4-6"}) == []
+
+    def test_no_region_with_a_guardrail_profile_is_rejected(self):
+        errors = self._errors(
+            {
+                "region": "sa-east-1",
+                "selected_model": "us.anthropic.claude-sonnet-4-6",
+                "allowed_bedrock_regions": ["sa-east-1"],
+            }
+        )
+        assert len(errors) == 1 and "can't be used in any guardrails Region" in errors[0]
+        assert "sa-east-1: no guardrail profile in this Region" in errors[0]
+
+
+class TestManagedModelRestriction:
+    """restrict_model_selection survives from-file -> profile -> export -> re-import."""
+
+    def test_restriction_round_trips_through_export(self, config_paths, tester, tmp_path):
+        from governed_inference_platform.cli.commands.init_answers import build_config_from_answers, load_answers_file
+
+        answers = tmp_path / "answers.yaml"
+        answers.write_text(
+            MINIMAL_YAML + "settings_target: managed\nlock_default_model: true\nrestrict_model_selection: true\n"
+        )
+        assert tester.run(f"--from-file {answers} --profile-name ci") == 0
+        saved = _load_profile(config_paths, "ci")
+        assert saved["restrict_model_selection"] is True and saved["lock_default_model"] is True
+
+        exported = tmp_path / "exported.yaml"
+        assert tester.run(f"--export-answers {exported} --profile-name ci") == 0
+        config, errors = build_config_from_answers(load_answers_file(exported))
+        assert errors == []
+        assert config["restrict_model_selection"] is True and config["lock_default_model"] is True

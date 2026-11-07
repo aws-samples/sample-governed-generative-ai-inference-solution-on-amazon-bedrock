@@ -268,3 +268,32 @@ def test_otel_helper_cmd_fallback_emits_json_under_a_powershell7_module_path(tmp
     assert json.loads(result.stdout) == {}
     assert "CommandNotFoundException" not in result.stderr
     assert (tmp_path / "home" / ".gip-session" / "e2e-otel-headers.json").is_file()
+
+
+def test_windows_installer_has_one_managed_settings_block():
+    """The batch installer carries one managed-settings install step (after -InstallAll), and no
+    unused pre-transaction copy steps that the generator would have to keep in sync."""
+    import tempfile
+
+    from governed_inference_platform.cli.commands.package import PackageCommand
+    from governed_inference_platform.config import Profile
+
+    profile = Profile(
+        name="win",
+        provider_domain="auth.example.com",
+        client_id="client-abc",
+        credential_storage="session",
+        aws_region="us-east-1",
+        identity_pool_name="test-pool",
+        monitoring_enabled=False,
+        settings_target="managed",
+        lock_default_model=True,
+        restrict_model_selection=True,
+        selected_model="us.anthropic.claude-sonnet-4-6",
+    )
+    with tempfile.TemporaryDirectory() as tmp:
+        bat = PackageCommand()._create_windows_installer(Path(tmp), profile).read_text()
+    assert bat.count("OK Managed settings installed") == 1
+    assert bat.count("-InstallManaged") == 1
+    assert bat.index("-InstallAll") < bat.index("-InstallManaged")
+    assert "REM Create directory" not in bat and "REM Copy configuration" not in bat

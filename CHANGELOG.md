@@ -13,6 +13,22 @@ Changes on this fork relative to upstream `beta`.
 
 ### Changed
 
+- **IAM: the Direct STS role's `MaxSessionDuration` follows the profile** in the
+  six OIDC auth templates (`bedrock-auth-okta`, `-azure`, `-auth0`, `-google`,
+  `-generic` and `-cognito-pool.yaml`). The new `MaxSessionDuration` parameter
+  (3600–43200 seconds; default 43200, the previous fixed value) sets the role's
+  maximum, and the Direct `ConfigurationJson` output requests the same duration.
+  For Direct STS, `gip deploy auth` passes the profile's `max_session_duration`
+  (43200 when it is null or 0). It stops before CloudFormation runs when the
+  value is outside 3600–43200, and it warns when it lowers an existing role. STS
+  rejects a longer request, so a lower value now caps modified clients too.
+  Lowering the value stops clients packaged with a longer duration until they
+  install a new package, so update the profile, run `gip package` and distribute
+  the package, then run `gip deploy auth`. A Direct profile whose JSON has no
+  `max_session_duration` loads 28800, and its next `gip deploy auth` lowers the
+  role from 43200 to 28800, which matches what its packaged clients request.
+  Cognito federation and IAM Identity Center are unchanged. Changing an existing
+  role needs `iam:UpdateRole`.
 - **IAM: the federated role gains two statements in all eight auth templates**
   (`bedrock-auth-okta`, `-azure`, `-auth0`, `-google`, `-generic`,
   `-cognito-pool` and `-idc.yaml`, and `cognito-identity-pool.yaml`).
@@ -104,6 +120,58 @@ Changes on this fork relative to upstream `beta`.
 
 ### Added
 
+- **`gip deploy metering` can adopt an existing invocation-logging
+  configuration.** The new profile field `metering_adopt_existing_config`
+  (answers file `metering.adopt_existing_config`, default false) passes
+  `AdoptExistingConfig=true` to every metered Region's stack; `gip init` asks
+  about it when metering and quota monitoring are enabled. Adoption accepts only
+  a metadata-only configuration that delivers to CloudWatch Logs, and leaves
+  that configuration unchanged. Deleting the stack leaves an adopted
+  configuration in place. Profiles without the field deploy the same parameters
+  as before. QUOTA_MONITORING documents the create, update and delete behavior.
+- **Opt-in Standard safeguard tier for enforced guardrails.**
+  `guardrails.safeguard_tier: STANDARD` (profile `guardrails_safeguard_tier`,
+  which `gip init` asks about when guardrails are enabled) deploys the content
+  filters on the Amazon Bedrock Guardrails Standard tier, which is more robust
+  and supports more languages and code-related prompts. Standard tier uses
+  cross-Region guardrail inference, so `gip deploy guardrails` decides the tier
+  for each guardrails Region. A Region uses Standard with its guardrail profile
+  (for example `us.guardrail.v1:0`, `eu.guardrail.v1:0`, `uk.guardrail.v1:0`)
+  when it has one and, for a data-residency profile (`au`, `eu`, `jp`,
+  `us-gov`), when that guardrail profile evaluates only inside the geography.
+  Every other Region deploys Classic, exactly as a Classic profile does; for
+  example, ca-west-1 in a US profile's default Regions and ap-southeast-4 in an
+  `au` profile's. `gip deploy guardrails` and `--show-commands` print each
+  Region's tier, guardrail profile and destination Regions, with the reason for
+  each Classic fallback, and stop when `allowed_bedrock_regions` is empty or
+  when no guardrails Region can use Standard (as with `jp` and its default
+  Regions, where Tokyo's only guardrail profile is `apac.guardrail.v1:0`); `gip
+  init --from-file` rejects the same answers. `gip deploy guardrails` also warns
+  about destination Regions outside `allowed_bedrock_regions`, and stops when
+  the deployed auth stack lacks the new grant. The governed roles now allow
+  `bedrock:ApplyGuardrail` on the account's guardrail profiles, so redeploy the
+  auth stack (`gip deploy auth`) before a Standard-tier guardrail; other roles
+  that invoke in-scope models need the same grant. Classic stays the default,
+  and Classic stacks deploy unchanged.
+- **Opt-in model restriction for managed settings.** The new
+  `restrict_model_selection` setting (default false), which `gip init` asks
+  about after a yes to the managed default model, restricts Claude Code to the
+  model selected in `gip init`. With managed settings and `lock_default_model:
+  true`, `gip package` then pins the default model's tier to that exact model
+  (an Application Inference Profile for that tier still takes precedence) and
+  writes `availableModels`, listing the pinned Bedrock IDs for the default (Opus
+  and Sonnet for `opusplan`) plus the Haiku-tier model, which background tasks
+  use and users can also select, and `enforceAvailableModels: true`. Claude
+  Code's `/model` then rejects another model, and `--model` or `ANTHROPIC_MODEL`
+  naming one is replaced at startup with a warning, so the session starts on the
+  default (observed for `--model` in Claude Code 2.1.318). Claude Code's default
+  prefix matching also admits later model IDs that extend a pinned ID. A Fable
+  default is pinned with `ANTHROPIC_DEFAULT_FABLE_MODEL`. Requires Claude Code
+  v2.1.175 or later. The restriction binds Claude Code only and a local
+  administrator can edit the file, so IAM remains the boundary for models and
+  Regions. On its own, `lock_default_model` still sets a default, not a lock,
+  and the new setting does nothing in user scope or without
+  `lock_default_model`.
 - Claude apps gateway deployment on ECS Fargate (`d6cae33`), with full
   `gip deploy/destroy/status gateway` CLI wiring and automatic
   `forceLoginMethod`/`forceLoginGatewayUrl` managed-settings injection
@@ -201,7 +269,7 @@ The first nine entries were found in an end-to-end sidecar-mode test on
   `<profile>-collector` profile, at most once. It skips the start when the
   receiver port already answers (for example the CoWork `otel-helper --proxy`)
   and keeps debug switches and tokens out of the collector's environment.
-  Windows is unchanged; see Known limitations.
+  Windows followed later; see the Windows entry below.
 - **Sidecar OTLP export was denied (HTTP 403).** The namespace-scoped
   `PutMetricData` statement could not authorize OTLP ingest, which carries no
   namespace, so quota usage stayed at 0. Fixed by `AllowCloudWatchOtlpMetrics`
@@ -341,49 +409,68 @@ The first nine entries were found in an end-to-end sidecar-mode test on
 - init wizard: the sidecar monitoring mode description incorrectly stated that
   Claude Desktop telemetry is not supported; sidecar mode is supported via the
   local otel-helper proxy (`otel-helper --proxy`).
+- **The sidecar collector now starts on Windows.** The Go `otel-helper` starts
+  `%USERPROFILE%\gip\otelcol.exe` the same way it starts `~/gip/otelcol` on
+  macOS and Linux: at most once, without a window, under the
+  `<profile>-collector` profile, and only when nothing already answers on the
+  receiver port. Sidecar-mode usage from Windows devices is now exported to
+  CloudWatch, where the quota monitor's usage query reads it. `install.bat` no
+  longer prints the known-limitation warning. Reinstalling stops the running
+  collector before replacing it, and `gip cleanup` now identifies and stops the
+  collector on Windows instead of leaving it running.
+- `gip init --from-file` and `gip deploy guardrails` reject cross-Region
+  inference profile IDs in `guardrails_model_include_list`, which CloudFormation
+  rejects. A foundation-model ID also covers calls through geographic
+  cross-Region inference profiles (verified for `us.` with Claude Haiku 4.5).
+- Re-running `gip init` on an existing profile no longer turns server-side
+  metering off. The wizard restores the profile's metering settings (enabled,
+  mode, adoption), and turns metering off only when quota monitoring is off,
+  which metering requires.
+- `gip deploy --show-commands` exits 1 when it can't build a stack's command,
+  such as for an out-of-range `max_session_duration`, instead of exiting 0.
 
 ### Known limitations
 
-- **Windows sidecar collector does not start.** On Windows nothing starts
-  `otelcol.exe` in the normal path: Claude Code runs `otel-helper.cmd`, which
-  falls back to `otel-helper.ps1`, the only Windows launcher, only when
-  `otel-helper.exe` fails. Sidecar usage from Windows devices therefore does not
-  reach CloudWatch. `install.bat` prints a warning in sidecar mode; use central
-  mode where Windows usage must be counted.
+- **`gip status` on Windows reports the local sidecar collector as not
+  installed.** It looks for `~/gip/otelcol` without the `.exe` suffix. The
+  collector itself starts and exports; `Get-Process otelcol` shows it.
 
 ### Documentation
 
-- Follow-up consistency fixes: HARNESSES no longer says managed settings lock
-  Claude Code's model. QUOTA_MONITORING: the periodic quota re-check runs only
-  when credential-process runs, so a block doesn't end a running session; Claude
-  Desktop usage isn't counted toward individual quotas (the old "CoWork support"
-  note said otherwise); the drift thresholds aren't stack parameters yet.
-  RUNBOOKS: how long to keep the per-user deny, and AWS's documented controls for
-  Claude Desktop's short-term API key. README, Quick Start and Deployment Paths:
-  the macOS and Linux installer needs `python3`. GUARDRAILS cites the enforced
-  guardrails FAQ on quota consumption. COWORK_3P: Desktop uses the credential
-  helper by default, not the AWS profile.
+- RUNBOOKS offboarding: IdP deactivation stops sign-ins and refreshes, but a
+  cached, unexpired ID token can still be exchanged for credentials, so the
+  per-user deny stays in place for that window too; a lowered
+  `MaxSessionDuration` applies only to new sessions, so the retention count uses
+  the previous value; Cognito identity-pool credentials last one hour (enhanced
+  flow), not the 8 hours the timeline said.
+- Follow-up consistency fixes: HARNESSES no longer says a managed default model
+  alone locks Claude Code's model. QUOTA_MONITORING: the periodic quota re-check
+  runs only when credential-process runs, so a block doesn't end a running
+  session; Claude Desktop usage isn't counted toward individual quotas (the old
+  "CoWork support" note said otherwise); the drift thresholds aren't stack
+  parameters yet. RUNBOOKS: how long to keep the per-user deny, and AWS's
+  documented controls for Claude Desktop's short-term API key. README, Quick
+  Start and Deployment Paths: the macOS and Linux installer needs `python3`.
+  GUARDRAILS cites the enforced guardrails FAQ on quota consumption. COWORK_3P:
+  Desktop uses the credential helper by default, not the AWS profile.
 - Managed settings wording now matches Claude Code's behavior: a managed
   `model` is a default, not a lock (`--model` and `ANTHROPIC_MODEL` still pick
   the session model; only `availableModels` restricts the choice). The
   `gip init` prompt for `lock_default_model`, the `--managed` help, the
   installer messages, the harness notes and the README, CLI Reference,
   Deployment and Harnesses docs no longer say managed settings are
-  "non-overridable" or lock the model. The `lock_default_model` field and
-  what it writes are unchanged. QUOTA_MONITORING: lowering
-  `max_session_duration` doesn't change the role's 12-hour maximum.
+  "non-overridable" or lock the model. (The new `restrict_model_selection`
+  setting adds a restriction; see Added.)
 - Heading anchors on QUOTA_MONITORING (server-side metering) and CLI_REFERENCE
   (cross-arch macOS build) now use `<a id>` tags, so links to them work on
   GitHub as well as on the docs site; GitHub ignores `{#id}` heading suffixes.
-- RUNBOOKS offboarding: added a per-user cut-off (inline deny on the role for the
-  user's `aws:userid`) and removed the claim that per-user STS revocation isn't
-  possible. QUOTA_MONITORING: `gip deploy metering` doesn't pass
-  `AdoptExistingConfig` yet, and content-logging accounts should use a dedicated
-  inference account or CUR 2.0. ARCHITECTURE: `max_session_duration` sets what
-  the client requests, not the role's 12-hour maximum. DEPLOYMENT: managed
-  settings bind Claude Code only and local admins can edit them; the installer
-  stops on a foreign `managed-settings.json`. GUARDRAILS: comprehensive message
-  guarding re-evaluates the whole conversation each turn for billing and quotas.
+- RUNBOOKS offboarding: added a per-user cut-off (inline deny on the role for
+  the user's `aws:userid`) and removed the claim that per-user STS revocation
+  isn't possible. QUOTA_MONITORING: content-logging accounts should use a
+  dedicated inference account or CUR 2.0. DEPLOYMENT: managed settings bind
+  Claude Code only and local admins can edit them; the installer stops on a
+  foreign `managed-settings.json`. GUARDRAILS: comprehensive message guarding
+  re-evaluates the whole conversation each turn for billing and quotas.
 - The README, Quick Start and Deployment Paths no longer list CI usage as a
   reason to choose the credential-process architecture: both sign-in paths
   need a person (OIDC browser sign-in with PKCE, IAM Identity Center device

@@ -520,7 +520,8 @@ packaged Claude Code settings use:
 {model_rows}
 
 **What does NOT carry over:** Claude Code's OTEL telemetry dashboards, the managed-settings
-default model, and the Claude apps gateway are Claude-Code-only. See
+default model and optional model restriction (`availableModels`), and the Claude apps gateway are
+Claude-Code-only. Other harnesses can call any model the IAM allow-list permits. See
 `assets/docs/HARNESSES.md` in the solution repository for the full capability matrix.
 
 ---

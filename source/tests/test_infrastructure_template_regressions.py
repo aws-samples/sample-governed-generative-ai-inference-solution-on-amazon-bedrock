@@ -64,7 +64,12 @@ def test_auth_templates_allow_apply_guardrail_only_for_own_account(template_name
 
     assert grant["Effect"] == "Allow"
     assert grant["Action"] == "bedrock:ApplyGuardrail"
-    assert grant["Resource"] == {"Fn::Sub": "arn:${AWS::Partition}:bedrock:*:${AWS::AccountId}:guardrail/*"}
+    # Own-account guardrails, plus the system-defined guardrail profiles a Standard-tier
+    # guardrail is evaluated through in the destination Regions (cross-Region inference).
+    assert grant["Resource"] == [
+        {"Fn::Sub": "arn:${AWS::Partition}:bedrock:*:${AWS::AccountId}:guardrail/*"},
+        {"Fn::Sub": "arn:${AWS::Partition}:bedrock:*:${AWS::AccountId}:guardrail-profile/*"},
+    ]
     assert grant["Condition"] == {"StringEquals": {"aws:RequestedRegion": {"Ref": "AllowedBedrockRegions"}}}
 
 

@@ -124,7 +124,6 @@ The wizard collects:
 - Optional monitoring setup:
   - Enable monitoring? (yes/no)
   - Monitoring mode: **central collector** (ECS Fargate) or **sidecar collector** (local). Sidecar mode skips VPC configuration and Athena SQL pipeline setup (PromQL dashboards are included in both modes).
-    - **Known limitation (Windows, sidecar mode):** the sidecar collector does not start on Windows in the normal path. Claude Code runs `otel-helper.cmd`, which runs `otel-helper.exe`; only `otel-helper.ps1` starts `otelcol.exe`, and `otel-helper.cmd` falls back to it only when the `.exe` fails. Claude Code usage from Windows devices therefore does not reach CloudWatch, and `install.bat` prints a warning in sidecar mode. macOS and Linux are not affected. Use central mode where Windows usage must be counted.
   - VPC configuration (central collector only)
 
 ---

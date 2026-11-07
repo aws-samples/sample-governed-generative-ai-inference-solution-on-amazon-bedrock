@@ -65,6 +65,8 @@ SHARED_PARAMS = [
     "RestrictToAnthropicModels",
     "EnableMonitoring",
     "SessionNameBinding",
+    # Direct STS role ceiling; `gip deploy` sets it from the profile's max_session_duration.
+    "MaxSessionDuration",
 ]
 
 # deploy.py template_map keys per provider.
@@ -96,7 +98,7 @@ def _config_json(provider_type, id_fields, mode):
     if mode == "direct":
         lines.append('  "federated_role_arn": "${DirectIAMRole.Arn}",')
         lines.append('  "aws_region": "${AWS::Region}",')
-        lines.append('  "max_session_duration": 43200')
+        lines.append('  "max_session_duration": ${MaxSessionDuration}')
     else:
         lines.append('  "identity_pool_id": "${CognitoIdentityPool}",')
         lines.append('  "federated_role_arn": "${CognitoAuthenticatedRole.Arn}",')
@@ -577,6 +579,24 @@ class TestReferenceAnchors:
             assert doc["Conditions"]["HasOidcThumbprints"] == [[["", "OidcThumbprintList"], ""]], provider
             props = doc["Resources"]["OIDCProvider"]["Properties"]
             assert props["ThumbprintList"] == ["HasOidcThumbprints", "OidcThumbprintList", "AWS::NoValue"], provider
+
+    @pytest.mark.parametrize("provider", PROVIDERS)
+    def test_direct_role_max_session_duration_is_parameterized(self, provider):
+        """The Direct STS role takes MaxSessionDuration from a 3600-43200 Number parameter
+        whose default (43200) keeps the value the role had before the parameter existed, and
+        ConfigurationJson requests the same duration so a console-built client never asks STS
+        for more than the role allows."""
+        template = _load_template(provider)
+        param = template["Parameters"]["MaxSessionDuration"]
+        assert param["Type"] == "Number"
+        assert (param["Default"], param["MinValue"], param["MaxValue"]) == (43200, 3600, 43200)
+        role = template["Resources"]["DirectIAMRole"]
+        assert role["Condition"] == "UseDirectIAM"
+        assert role["Properties"]["MaxSessionDuration"] == "MaxSessionDuration"  # !Ref
+        direct_config = template["Outputs"]["ConfigurationJson"]["Value"][1]
+        assert '"max_session_duration": ${MaxSessionDuration}' in direct_config
+        groups = template["Metadata"]["AWS::CloudFormation::Interface"]["ParameterGroups"]
+        assert any("MaxSessionDuration" in g["Parameters"] for g in groups)
 
     def test_mantle_endpoint_is_explicitly_denied(self, canonical):
         statements = canonical[REFERENCE]["Resources"]["BedrockAccessPolicy"]["Properties"]["PolicyDocument"][

@@ -17,6 +17,7 @@ Metadata:
           - FederatedRoleName
           - IdentityPoolName
           - SessionNameBinding
+          - MaxSessionDuration
       - Label:
           default: "Model governance"
         Parameters:
@@ -44,6 +45,8 @@ Metadata:
         default: "Monitoring mode (sidecar grants direct OTLP writes)"
       SessionNameBinding:
         default: "Bind STS session name to identity claim"
+      MaxSessionDuration:
+        default: "Maximum Direct STS session duration (seconds)"
       GoogleDomain:
         default: "Google OIDC provider domain"
       GoogleClientId:
@@ -100,6 +103,19 @@ Parameters:
     Description: Name for the IAM role used for federation
     AllowedPattern: '^[a-zA-Z][a-zA-Z0-9-_]*$'
     MaxLength: 64
+
+  MaxSessionDuration:
+    Type: Number
+    Default: 43200
+    MinValue: 3600
+    MaxValue: 43200
+    Description: >-
+      Maximum session duration, in seconds, of the Direct STS federated role
+      (FederationType=direct). STS rejects any AssumeRoleWithWebIdentity call
+      that asks for longer, so this caps what every client can get, modified
+      or not. `gip deploy` sets it from the profile's max_session_duration.
+      The default 43200 (12 hours) is the value this role had before the
+      parameter existed. ConfigurationJson requests the same duration.
 
   AllowedBedrockRegions:
     Type: CommaDelimitedList
@@ -262,7 +278,11 @@ Resources:
           - Sid: AllowOwnAccountGuardrails
             Effect: Allow
             Action: 'bedrock:ApplyGuardrail'
-            Resource: !Sub 'arn:${AWS::Partition}:bedrock:*:${AWS::AccountId}:guardrail/*'
+            # guardrail-profile/*: a Standard-tier guardrail is evaluated through a
+            # system-defined guardrail profile in the destination Regions.
+            Resource:
+              - !Sub 'arn:${AWS::Partition}:bedrock:*:${AWS::AccountId}:guardrail/*'
+              - !Sub 'arn:${AWS::Partition}:bedrock:*:${AWS::AccountId}:guardrail-profile/*'
             Condition:
               StringEquals:
                 'aws:RequestedRegion': !Ref AllowedBedrockRegions
@@ -331,7 +351,7 @@ Resources:
     Properties:
       RoleName: !Ref FederatedRoleName
       Description: Direct IAM role for Google users accessing Bedrock
-      MaxSessionDuration: 43200  # 12 hours
+      MaxSessionDuration: !Ref MaxSessionDuration
       AssumeRolePolicyDocument:
         Version: '2012-10-17'
         Statement:
@@ -584,7 +604,7 @@ Outputs:
           "client_id": "${GoogleClientId}",
           "federated_role_arn": "${DirectIAMRole.Arn}",
           "aws_region": "${AWS::Region}",
-          "max_session_duration": 43200
+          "max_session_duration": ${MaxSessionDuration}
         }
       - !Sub |
         {

@@ -116,7 +116,10 @@ quick-create links once you publish the templates to an S3 bucket with
    auth0, google, generic, or cognito-pool) with your IdP domain and client
    ID. `RestrictToAnthropicModels=true` is the default server-side model
    governance setting; set it to `false` only for approved non-Anthropic or
-   opaque application-inference-profile deployments.
+   opaque application-inference-profile deployments. For Direct STS,
+   `MaxSessionDuration` (3600–43200 seconds, default 43200) is the longest
+   session STS grants on the federated role; the `ConfigurationJson` output
+   requests the same duration.
 3. Copy the stack's **`ConfigurationJson` output** — this is the complete,
    ready-to-use client `config.json`. No packaging step required.
 4. Build the **client binaries** (`credential-process` for each OS) once on an

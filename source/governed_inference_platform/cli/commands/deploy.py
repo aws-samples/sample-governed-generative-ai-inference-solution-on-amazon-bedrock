@@ -9,9 +9,10 @@ import re
 import shutil
 import sys
 import tempfile
+from dataclasses import dataclass
 from pathlib import Path
 
-from botocore.exceptions import ClientError
+from botocore.exceptions import BotoCoreError, ClientError
 from cleo.commands.command import Command
 from cleo.helpers import argument, option
 from rich import box
@@ -33,7 +34,7 @@ from governed_inference_platform.cli.utils.helpers import (
     get_codebuild_region,
 )
 from governed_inference_platform.cli.utils.proc import run_checked
-from governed_inference_platform.config import WEBSEARCH_SUPPORTED_REGIONS, Config
+from governed_inference_platform.config import WEBSEARCH_SUPPORTED_REGIONS, Config, Profile
 
 # All deployable stack types. Used for input validation and help text.
 # Keep in sync with DESTROYABLE_STACKS in destroy.py when adding new stacks.
@@ -122,6 +123,67 @@ def _monitoring_mode_param(profile) -> str:
     would let users post telemetry around the JWT-validated path.
     """
     return "sidecar" if getattr(profile, "monitoring_mode", "central") == "sidecar" else "central"
+
+
+# AWS::IAM::Role accepts a MaxSessionDuration of 3600-43200 seconds. 43200 is also
+# the value the OIDC auth templates hard-coded before the parameter existed.
+ROLE_MAX_SESSION_DURATION_MIN = 3600
+ROLE_MAX_SESSION_DURATION_MAX = 43200
+
+
+def role_max_session_duration(profile: Profile) -> int:
+    """Value for the OIDC auth templates' MaxSessionDuration parameter (the Direct STS role).
+
+    The role follows the profile's max_session_duration, which is the duration
+    credential-process requests, so STS rejects any longer request, including one
+    from a modified client. A profile without a value (None, or 0, which the Go
+    credential-process also treats as unset) gets 43200, the role's previous value.
+
+    Raises:
+        ValueError: the value is not a whole number of seconds from 3600 to 43200.
+            The message says how to fix the profile.
+    """
+    value = getattr(profile, "max_session_duration", None)
+    if value is None or (type(value) is int and value == 0):
+        return ROLE_MAX_SESSION_DURATION_MAX
+    if type(value) is not int or not ROLE_MAX_SESSION_DURATION_MIN <= value <= ROLE_MAX_SESSION_DURATION_MAX:
+        name = getattr(profile, "name", "<profile>")
+        raise ValueError(
+            f"max_session_duration is {value!r} in profile '{name}', but the auth stack's Direct STS "
+            f"role accepts {ROLE_MAX_SESSION_DURATION_MIN}-{ROLE_MAX_SESSION_DURATION_MAX} seconds. "
+            f"Set it to a whole number from {ROLE_MAX_SESSION_DURATION_MIN} to "
+            f"{ROLE_MAX_SESSION_DURATION_MAX} (run 'gip init' to update the profile, or edit "
+            f"~/.gip/profiles/{name}.json), then run 'gip deploy auth' again."
+        )
+    return value
+
+
+def _role_session_shrink_warning(cf_manager: CloudFormationManager, stack_name: str, new_value: int) -> str | None:
+    """Return a warning when this deploy lowers an existing Direct STS role's MaxSessionDuration.
+
+    Installed clients request the max_session_duration that `gip package` wrote into their
+    config.json, and STS fails any request above the role's maximum. Lowering the role
+    therefore stops clients packaged with a longer duration until they install a newer
+    package. Returns None for a new stack, a cognito-federation stack, a value that isn't
+    lower, or when the current parameters can't be read (the deploy reports real errors).
+    """
+    try:
+        current = cf_manager.get_stack_parameters(stack_name)
+    except (ClientError, BotoCoreError):
+        return None
+    if not isinstance(current, dict) or current.get("FederationType") != "direct":
+        return None
+    # Stacks created before the parameter existed have the fixed 43200.
+    previous = str(current.get("MaxSessionDuration") or ROLE_MAX_SESSION_DURATION_MAX)
+    if not previous.isdigit() or new_value >= int(previous):
+        return None
+    return (
+        f"Lowering the Direct STS role's maximum session duration from {previous}s to {new_value}s. "
+        "Installed clients request the max_session_duration in their package's config.json, and STS "
+        f"rejects any request above the role's maximum, so clients packaged with more than {new_value}s "
+        "stop getting credentials until they install a package built with 'gip package' after this "
+        "change. Sessions already issued keep their expiry."
+    )
 
 
 class OidcThumbprintLookupError(CloudFormationError):
@@ -352,13 +414,236 @@ def guardrails_name(profile) -> str:
     return safe or "gip-guardrail"
 
 
+# Guardrail profiles for Standard-tier (cross-Region) guardrail inference, by source Region:
+# (profile ID, destination Regions). From the Amazon Bedrock User Guide, "Supported Regions for
+# cross-Region guardrail inference" (guardrails-cross-region-support.html, read 2026-11-07).
+# ap-southeast-2 is listed under both AU and APAC; AU keeps evaluation in Australia.
+_US = ("us-east-1", "us-east-2", "us-west-2")
+_EU = ("eu-central-1", "eu-west-1", "eu-west-3", "eu-north-1")
+_APAC = ("ap-south-1", "ap-northeast-3", "ap-northeast-2", "ap-southeast-1", "ap-southeast-2", "ap-northeast-1")
+_APAC_WIDE = (
+    "ap-south-1",
+    "ap-south-2",
+    "ap-southeast-1",
+    "ap-southeast-2",
+    "ap-southeast-3",
+    "ap-southeast-4",
+    "ap-northeast-1",
+    "ap-northeast-2",
+    "ap-northeast-3",
+)
+GUARDRAIL_PROFILES: dict[str, tuple[str, tuple[str, ...]]] = {
+    "us-east-1": ("us.guardrail.v1:0", _US),
+    "us-east-2": ("us.guardrail.v1:0", _US),
+    "us-west-1": ("us.guardrail.v1:0", (*_US, "us-west-1")),
+    "us-west-2": ("us.guardrail.v1:0", _US),
+    "us-gov-east-1": ("us-gov.guardrail.v1:0", ("us-gov-east-1", "us-gov-west-1")),
+    "us-gov-west-1": ("us-gov.guardrail.v1:0", ("us-gov-east-1", "us-gov-west-1")),
+    "eu-central-1": ("eu.guardrail.v1:0", _EU),
+    "eu-west-1": ("eu.guardrail.v1:0", _EU),
+    "eu-west-3": ("eu.guardrail.v1:0", _EU),
+    "eu-north-1": ("eu.guardrail.v1:0", _EU),
+    "eu-south-1": ("eu.guardrail.v1:0", (*_EU, "eu-south-1")),
+    "eu-south-2": ("eu.guardrail.v1:0", (*_EU, "eu-south-2")),
+    "il-central-1": ("eu.guardrail.v1:0", (*_EU, "eu-south-1", "il-central-1")),
+    "eu-west-2": ("uk.guardrail.v1:0", ("eu-west-2",)),
+    "ap-southeast-2": ("au.guardrail.v1:0", ("ap-southeast-2",)),
+    "ca-central-1": ("ca.guardrail.v1:0", ("ca-central-1", "ca-west-1")),
+    "ap-south-1": ("apac.guardrail.v1:0", _APAC),
+    "ap-northeast-2": ("apac.guardrail.v1:0", _APAC),
+    "ap-southeast-1": ("apac.guardrail.v1:0", _APAC),
+    "ap-northeast-1": ("apac.guardrail.v1:0", _APAC),
+    "ap-southeast-3": ("apac.guardrail.v1:0", _APAC_WIDE),
+    "ap-southeast-4": ("apac.guardrail.v1:0", tuple(r for r in _APAC_WIDE if r != "ap-southeast-3")),
+    "ap-east-2": ("apac.guardrail.v1:0", ("ap-east-2", *_APAC_WIDE)),
+    "ap-southeast-5": ("apac.guardrail.v1:0", (*_APAC_WIDE, "ap-southeast-5")),
+    "ap-southeast-7": ("apac.guardrail.v1:0", (*_APAC_WIDE, "ap-southeast-7")),
+    "me-central-1": ("apac.guardrail.v1:0", (*_APAC_WIDE, "me-central-1")),
+}
+
+GUARDRAIL_SAFEGUARD_TIERS = ("CLASSIC", "STANDARD")
+
+# The include-list ID pattern lives in models.py (ENFORCED_GUARDRAIL_MODEL_ID) so that answers-file
+# validation applies it too. A foundation-model ID also guards calls through geographic cross-Region
+# inference profiles (verified for us. with Claude Haiku 4.5); global. profiles and Application
+# Inference Profiles were not tested.
+
+
+def guardrails_safeguard_tier(profile) -> str:
+    """Return the profile's content-filter safeguard tier (CLASSIC unless set)."""
+    return (getattr(profile, "guardrails_safeguard_tier", None) or "CLASSIC").upper()
+
+
+@dataclass(frozen=True)
+class GuardrailRegionTier:
+    """The safeguard tier one guardrails Region deploys with."""
+
+    region: str
+    tier: str  # "STANDARD" or "CLASSIC"
+    guardrail_profile: str | None = None  # Standard only
+    destinations: tuple[str, ...] = ()  # Standard only: where prompts and responses can be evaluated
+    classic_reason: str | None = None  # why a Region fell back to Classic when Standard was requested
+
+
+def guardrails_region_tier(profile, region: str) -> GuardrailRegionTier:
+    """Decide the safeguard tier for one guardrails Region. No AWS calls.
+
+    Classic profiles get Classic everywhere. A Standard profile gets Standard in a Region only when
+    (a) the Region has a guardrail profile (GUARDRAIL_PROFILES), and (b) for a data-residency
+    cross_region_profile (models.DATA_RESIDENCY_PREFIXES), every destination of that guardrail
+    profile is the Region itself or inside the residency geography that model routing stays in.
+    Every other Region stays on Classic, with the reason recorded.
+    """
+    from governed_inference_platform.models import residency_geography_regions
+
+    if guardrails_safeguard_tier(profile) != "STANDARD":
+        return GuardrailRegionTier(region, "CLASSIC")
+    if region not in GUARDRAIL_PROFILES:
+        return GuardrailRegionTier(region, "CLASSIC", classic_reason="no guardrail profile in this Region")
+    profile_id, destinations = GUARDRAIL_PROFILES[region]
+    cris_prefix = getattr(profile, "cross_region_profile", None)
+    geography = residency_geography_regions(cris_prefix)
+    if geography is not None:
+        outside = [d for d in destinations if d != region and d not in geography]
+        if outside:
+            return GuardrailRegionTier(
+                region,
+                "CLASSIC",
+                classic_reason=(
+                    f"guardrail profile {profile_id} would evaluate in {', '.join(outside)}, outside the "
+                    f"{cris_prefix} data-residency geography"
+                ),
+            )
+    return GuardrailRegionTier(region, "STANDARD", profile_id, tuple(destinations))
+
+
+def guardrails_tier_plan(profile) -> tuple[list[GuardrailRegionTier], str | None]:
+    """Per-Region tiers for every guardrails Region, and a hard-stop message (None when deployable).
+
+    Hard stops for a Standard profile: an empty allowed_bedrock_regions list (guardrails would deploy
+    to every Bedrock Region), and no guardrails Region that can use Standard at all.
+    """
+    if guardrails_safeguard_tier(profile) == "STANDARD" and not (
+        getattr(profile, "allowed_bedrock_regions", None) or []
+    ):
+        return [], (
+            "guardrails_safeguard_tier STANDARD needs an explicit allowed_bedrock_regions list: with an "
+            "empty list, guardrails deploy to every Bedrock Region."
+        )
+    plan = [guardrails_region_tier(profile, region) for region in guardrails_regions(profile)]
+    if guardrails_safeguard_tier(profile) == "STANDARD" and not any(r.tier == "STANDARD" for r in plan):
+        reasons = "; ".join(f"{r.region}: {r.classic_reason}" for r in plan)
+        return plan, (
+            f"guardrails_safeguard_tier STANDARD can't be used in any guardrails Region ({reasons}). Use CLASSIC."
+        )
+    return plan, None
+
+
+def guardrails_standard_tier_destinations(profile) -> dict[str, tuple[str, tuple[str, ...]]]:
+    """Return {Region: (guardrail profile ID, destination Regions)} for the Regions deploying Standard."""
+    plan, _ = guardrails_tier_plan(profile)
+    return {r.region: (r.guardrail_profile, r.destinations) for r in plan if r.tier == "STANDARD"}
+
+
+def guardrails_standard_tier_warnings(profile) -> list[str]:
+    """Destination Regions of the Standard-tier guardrail profiles that allowed_bedrock_regions omits.
+
+    Standard tier can evaluate prompts and responses in any destination Region of the guardrail
+    profile, including Regions an administrator left out of allowed_bedrock_regions. That is a
+    data-residency fact to surface, not an IAM failure: in a live check the role's
+    aws:RequestedRegion condition (source Region only) did not block the cross-Region evaluation.
+    """
+    from governed_inference_platform.models import expand_region_sentinels
+
+    allowed = set(expand_region_sentinels(list(getattr(profile, "allowed_bedrock_regions", []) or [])))
+    if not allowed or guardrails_safeguard_tier(profile) != "STANDARD":
+        return []
+    warnings = []
+    for region, (profile_id, destinations) in guardrails_standard_tier_destinations(profile).items():
+        missing = [d for d in destinations if d not in allowed]
+        if missing:
+            warnings.append(
+                f"{region}: guardrail profile {profile_id} can evaluate prompts and responses in "
+                f"{', '.join(missing)}, which allowed_bedrock_regions does not include."
+            )
+    return warnings
+
+
+def print_guardrails_tier_plan(profile, console: Console) -> None:
+    """Print Region -> tier -> guardrail profile -> destinations, with each Classic fallback's reason."""
+    if guardrails_safeguard_tier(profile) != "STANDARD":
+        return
+    plan, _ = guardrails_tier_plan(profile)
+    table = Table(title="Guardrails safeguard tier by Region", box=box.SIMPLE)
+    for column in ("Region", "Tier", "Guardrail profile", "Destinations / reason"):
+        table.add_column(column)
+    for r in plan:
+        if r.tier == "STANDARD":
+            table.add_row(r.region, "STANDARD", r.guardrail_profile, ", ".join(r.destinations))
+        else:
+            table.add_row(r.region, "CLASSIC", "-", f"Classic: {r.classic_reason}")
+    console.print(table)
+
+
+def guardrails_auth_grant_status(profile) -> tuple[str, str | None]:
+    """Check that the deployed auth stack lets governed roles apply a Standard-tier guardrail.
+
+    Standard tier is evaluated through a guardrail profile, so every in-scope invocation needs
+    bedrock:ApplyGuardrail on guardrail-profile/* as well as guardrail/*. An auth stack deployed
+    before that grant existed turns a Standard-tier guardrail into AccessDeniedException for every
+    governed user. Returns ("ok", None), ("missing", message) or ("unverified", reason).
+    """
+    import json
+    import urllib.parse
+
+    import boto3
+    from botocore.exceptions import BotoCoreError
+
+    stack_name = profile.stack_names.get("auth", f"{profile.identity_pool_name}-stack")
+    try:
+        cfn = boto3.client("cloudformation", region_name=profile.aws_region)
+        resource = cfn.describe_stack_resource(StackName=stack_name, LogicalResourceId="BedrockAccessPolicy")
+        policy_arn = resource["StackResourceDetail"]["PhysicalResourceId"]
+        # IAM is partition-global; the region only selects the partition endpoint.
+        iam = boto3.client("iam", region_name=profile.aws_region)
+        version_id = iam.get_policy(PolicyArn=policy_arn)["Policy"]["DefaultVersionId"]
+        document = iam.get_policy_version(PolicyArn=policy_arn, VersionId=version_id)["PolicyVersion"]["Document"]
+    except (ClientError, BotoCoreError, KeyError, TypeError) as e:
+        return "unverified", f"could not read BedrockAccessPolicy from auth stack {stack_name}: {e}"
+    text = document if isinstance(document, str) else json.dumps(document)
+    if "guardrail-profile/" in urllib.parse.unquote(text):
+        return "ok", None
+    return "missing", (
+        f"The auth stack {stack_name} predates Standard-tier support: its BedrockAccessPolicy "
+        f"({policy_arn}) has no bedrock:ApplyGuardrail grant on guardrail-profile/*, so every in-scope "
+        "invocation would fail with AccessDeniedException. Run 'gip deploy auth' first, then "
+        "'gip deploy guardrails'."
+    )
+
+
 def guardrails_preflight(profile) -> tuple[bool, str | None]:
+    from governed_inference_platform.models import invalid_guardrail_include_ids
+
     strength = getattr(profile, "guardrails_content_filter_strength", "MEDIUM") or "MEDIUM"
     if strength not in ("LOW", "MEDIUM", "HIGH"):
         return False, "guardrails_content_filter_strength must be one of LOW, MEDIUM, HIGH."
+    tier = guardrails_safeguard_tier(profile)
+    if tier not in GUARDRAIL_SAFEGUARD_TIERS:
+        return False, "guardrails_safeguard_tier must be CLASSIC or STANDARD."
+    _, stop = guardrails_tier_plan(profile)
+    if stop:
+        return False, stop
     models = getattr(profile, "guardrails_model_include_list", None) or []
     if not isinstance(models, list) or any(not isinstance(m, str) or not m.strip() or "," in m for m in models):
         return False, "guardrails_model_include_list must be a list of non-empty model IDs without commas."
+    rejected = invalid_guardrail_include_ids(models)
+    if rejected:
+        return False, (
+            f"guardrails_model_include_list has IDs Bedrock enforcement doesn't accept: {', '.join(rejected)}. "
+            "Use foundation-model IDs such as anthropic.claude-haiku-4-5-20251001-v1:0, not cross-Region "
+            "inference profile IDs (us.anthropic...). The foundation-model ID also covers calls through geographic "
+            "cross-Region inference profiles (verified for us. with Claude Haiku 4.5)."
+        )
     kms_key_arn = getattr(profile, "guardrails_kms_key_arn", None)
     if kms_key_arn:
         regions = guardrails_regions(profile)
@@ -369,12 +654,20 @@ def guardrails_preflight(profile) -> tuple[bool, str | None]:
     return True, None
 
 
-def build_guardrails_params(profile) -> list[str]:
-    """Build CloudFormation parameters for the regional guardrails enforcement stack."""
+def build_guardrails_params(profile, region: str | None = None) -> list[str]:
+    """Build CloudFormation parameters for the regional guardrails enforcement stack.
+
+    A Region that guardrails_region_tier puts on Standard adds SafeguardTier and the Region's
+    guardrail profile. Classic Regions, including a Standard profile's fallback Regions, pass
+    neither, so their parameters are exactly what a Classic profile deploys.
+    """
     params = [
         f"GuardrailName={guardrails_name(profile)}",
         f"ContentFilterStrength={getattr(profile, 'guardrails_content_filter_strength', None) or 'MEDIUM'}",
     ]
+    decision = guardrails_region_tier(profile, region or profile.aws_region)
+    if decision.tier == "STANDARD":
+        params += ["SafeguardTier=STANDARD", f"GuardrailProfileId={decision.guardrail_profile}"]
     models = [m.strip() for m in (getattr(profile, "guardrails_model_include_list", None) or []) if m.strip()]
     if models:
         params.append(f"ModelIncludeList={','.join(models)}")
@@ -1000,6 +1293,14 @@ class DeployCommand(Command):
         else:
             # Deploy all configured stacks in dependency order.
             stacks_to_deploy = self._select_full_deploy_stacks(profile, console)
+            # Guardrails stops (tier plan, include list, KMS key) depend only on the profile, so
+            # check them before any stack deploys. The auth-grant check needs the updated auth
+            # stack and still runs when the guardrails stack's turn comes.
+            if any(stack == "guardrails" for stack, _desc in stacks_to_deploy):
+                ok, msg = guardrails_preflight(profile)
+                if not ok:
+                    console.print(msg, style="red", markup=False, highlight=False)
+                    return 1
 
             # Web search gateway — independent stack, only needs the IdP from auth.
             # Deployed cross-region (us-east-1) where the connector is available.
@@ -1125,8 +1426,7 @@ class DeployCommand(Command):
 
         if show_commands:
             # Just show the commands that would be executed
-            self._show_all_deployment_commands(stacks_to_deploy, profile, console)
-            return 0
+            return self._show_all_deployment_commands(stacks_to_deploy, profile, console)
 
         # Deploy stacks
         console.print("\n[bold]Deploying stacks...[/bold]\n")
@@ -1533,6 +1833,19 @@ class DeployCommand(Command):
                     )
                     return 1
                 params.append(f"SessionNameBinding={session_binding}")
+
+                # The Direct STS role's MaxSessionDuration follows the profile. Cognito
+                # federation creates no Direct STS role, so the template default stands.
+                if profile.federation_type == "direct":
+                    try:
+                        max_session = role_max_session_duration(profile)
+                    except ValueError as e:
+                        console.print(str(e), style="red", markup=False, highlight=False)
+                        return 1
+                    params.append(f"MaxSessionDuration={max_session}")
+                    shrink_warning = _role_session_shrink_warning(cf_manager, stack_name, max_session)
+                    if shrink_warning:
+                        console.print(f"⚠ {shrink_warning}", style="yellow", markup=False, highlight=False)
 
                 if provider_type == "okta":
                     params.extend(
@@ -2165,6 +2478,19 @@ class DeployCommand(Command):
                 quota_table_name = quota_outputs["QuotaTableName"]
                 alert_topic_arn = quota_outputs.get("QuotaAlertTopicArn", "")
                 metering_mode = getattr(profile, "metering_mode", "shadow")
+                # Adopt an existing metadata-only invocation-logging configuration
+                # instead of failing closed. Omitted when off, so the template
+                # default ('false') applies exactly as before.
+                adopt_setting = getattr(profile, "metering_adopt_existing_config", False)
+                adopt_existing = adopt_setting is True
+                if not isinstance(adopt_setting, bool):
+                    console.print(
+                        f"⚠ metering_adopt_existing_config is {adopt_setting!r}, not true or false; "
+                        "treating it as false. Fix it with 'gip init' or in the profile JSON.",
+                        style="yellow",
+                        markup=False,
+                        highlight=False,
+                    )
 
                 # One stack per Bedrock source region: with CRIS, invocation logs
                 # stay in the source region, and users can only invoke in
@@ -2229,13 +2555,18 @@ class DeployCommand(Command):
                         # topics — only wire the quota alert topic in its region.
                         if region == profile.aws_region and alert_topic_arn:
                             params.append(f"AlarmTopicArn={alert_topic_arn}")
+                        if adopt_existing:
+                            params.append("AdoptExistingConfig=true")
 
                         result = deploy_with_cf(
                             packaged_template_path,
                             stack_name,
                             params,
                             ["CAPABILITY_NAMED_IAM"],
-                            task_description=f"Deploying metering stack in {region} ({metering_mode} mode)...",
+                            task_description=(
+                                f"Deploying metering stack in {region} ({metering_mode} mode"
+                                f"{', adopting existing logging config' if adopt_existing else ''})..."
+                            ),
                             cf=region_cf,
                         )
                         if result != 0:
@@ -2261,13 +2592,30 @@ class DeployCommand(Command):
                 if not ok:
                     console.print(f"[red]{msg}[/red]")
                     return 1
+                if guardrails_safeguard_tier(profile) == "STANDARD":
+                    # Checked here rather than at stack selection, so `gip deploy` (all stacks)
+                    # sees the auth stack it has just updated.
+                    grant, detail = guardrails_auth_grant_status(profile)
+                    if grant == "missing":
+                        console.print(f"[red]{detail}[/red]")
+                        return 1
+                    if grant == "unverified":
+                        console.print(
+                            f"[yellow]Warning: the guardrail-profile grant could not be verified ({detail}). "
+                            "Make sure every role that invokes in-scope models has bedrock:ApplyGuardrail on "
+                            "guardrail-profile/*, or run 'gip deploy auth' first.[/yellow]"
+                        )
 
                 template = project_root / "deployment" / "infrastructure" / "guardrails-enforcement.yaml"
                 stack_name = profile.stack_names.get("guardrails", f"{profile.identity_pool_name}-guardrails")
-                params = build_guardrails_params(profile)
                 regions = guardrails_regions(profile)
+                if guardrails_safeguard_tier(profile) == "STANDARD":
+                    print_guardrails_tier_plan(profile, console)
+                    for warning in guardrails_standard_tier_warnings(profile):
+                        console.print(f"[yellow]Warning: {warning}[/yellow]")
                 failed_regions = []
                 for guardrails_region in regions:
+                    params = build_guardrails_params(profile, guardrails_region)
                     region_cf = (
                         cf_manager
                         if guardrails_region == profile.aws_region
@@ -2660,15 +3008,19 @@ class DeployCommand(Command):
                 console.print(f"[red]Unknown stack type: {stack_type}[/red]")
                 return 1
 
-    def _show_all_deployment_commands(self, stacks_to_deploy, profile, console):
-        """Show AWS CLI commands that would be executed."""
+    def _show_all_deployment_commands(
+        self, stacks_to_deploy: list[tuple[str, str]], profile: Profile, console: Console
+    ) -> int:
+        """Show AWS CLI commands that would be executed. Returns 1 if any stack's command can't be built."""
         console.print("\n[bold]AWS CLI Commands:[/bold]")
+        status = 0
         for stack_type, description in stacks_to_deploy:
             console.print(f"\n[dim]# {description}[/dim]")
-            self._show_deployment_commands(stack_type, profile, console)
+            status |= self._show_deployment_commands(stack_type, profile, console)
+        return status
 
-    def _show_deployment_commands(self, stack_type: str, profile, console: Console) -> None:
-        """Show AWS CLI commands for manual deployment."""
+    def _show_deployment_commands(self, stack_type: str, profile, console: Console) -> int:
+        """Show AWS CLI commands for manual deployment. Returns 1 when the profile can't produce them."""
         project_root = Path(__file__).parents[4]
         # CodeBuild may deploy to a different region than the main infrastructure;
         # print the command for the region it actually deploys to.
@@ -2727,6 +3079,12 @@ class DeployCommand(Command):
                     f"RestrictToAnthropicModels={str(getattr(profile, 'restrict_to_anthropic_models', True)).lower()}",
                     f"SessionNameBinding={getattr(profile, 'session_name_binding', 'none') or 'none'}",
                 ]
+                if profile.federation_type == "direct":
+                    try:
+                        params.append(f"MaxSessionDuration={role_max_session_duration(profile)}")
+                    except ValueError as e:
+                        console.print(str(e), style="red", markup=False, highlight=False)
+                        return 1
                 if provider_type == "okta":
                     params.extend([f"OktaDomain={profile.provider_domain}", f"OktaClientId={profile.client_id}"])
                 elif provider_type == "auth0":
@@ -2861,11 +3219,21 @@ class DeployCommand(Command):
             print_deploy_cmd("/tmp/quota-monitoring-packaged.yaml", stack_name, params)
 
         elif stack_type == "guardrails":
+            ok, msg = guardrails_preflight(profile)
+            if not ok:
+                console.print(msg, style="red", markup=False, highlight=False)
+                return 1
+            print_guardrails_tier_plan(profile, console)
             template = project_root / "deployment" / "infrastructure" / "guardrails-enforcement.yaml"
             stack_name = profile.stack_names.get("guardrails", f"{profile.identity_pool_name}-guardrails")
-            params = build_guardrails_params(profile)
             for guardrails_region in guardrails_regions(profile):
                 region = guardrails_region
+                params = build_guardrails_params(profile, guardrails_region)
+                # `aws cloudformation deploy` keeps an omitted parameter's previous value on an
+                # existing stack, so a Region that is now Classic names the tier explicitly
+                # (the template defaults, so a Classic stack is unchanged).
+                if not any(p.startswith("SafeguardTier=") for p in params):
+                    params += ["SafeguardTier=CLASSIC", "GuardrailProfileId="]
                 print_deploy_cmd(template, stack_name, params, ["CAPABILITY_IAM"])
 
         elif stack_type == "model-lifecycle":
@@ -2932,6 +3300,8 @@ class DeployCommand(Command):
 
         else:
             console.print(f"[yellow]  No command template available for stack type: {stack_type}[/yellow]")
+
+        return 0
 
     def _show_stack_outputs(self, profile, console: Console, config: Config) -> None:
         """Show outputs from deployed stacks."""
