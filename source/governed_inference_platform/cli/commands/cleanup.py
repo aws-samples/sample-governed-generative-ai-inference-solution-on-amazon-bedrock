@@ -244,7 +244,7 @@ class CleanupCommand(Command):
 
                 name = relative.name
                 quarantine = f".{name}.gip-quarantine-{uuid.uuid4().hex}"
-                os.rename(name, quarantine, src_dir_fd=directory_fd, dst_dir_fd=directory_fd)
+                os.replace(name, quarantine, src_dir_fd=directory_fd, dst_dir_fd=directory_fd)
                 try:
                     file_fd = os.open(
                         quarantine,
