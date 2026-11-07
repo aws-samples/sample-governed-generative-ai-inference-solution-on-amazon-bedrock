@@ -70,7 +70,8 @@ class TestGuardrailsRoundTrip:
                 guardrails_enabled=True,
                 guardrails_name="team-guardrail",
                 guardrails_content_filter_strength="HIGH",
-                guardrails_model_include_list=["us.anthropic.claude-sonnet-5"],
+                guardrails_safeguard_tier="STANDARD",
+                guardrails_model_include_list=["anthropic.claude-sonnet-5"],
                 guardrails_kms_key_arn="arn:aws:kms:us-east-1:123456789012:key/00000000-1111-2222-3333-444444444444",
             )
         )
@@ -79,7 +80,8 @@ class TestGuardrailsRoundTrip:
             "enabled": True,
             "name": "team-guardrail",
             "content_filter_strength": "HIGH",
-            "model_include_list": ["us.anthropic.claude-sonnet-5"],
+            "safeguard_tier": "STANDARD",
+            "model_include_list": ["anthropic.claude-sonnet-5"],
             "kms_key_arn": "arn:aws:kms:us-east-1:123456789012:key/00000000-1111-2222-3333-444444444444",
         }
 
@@ -104,4 +106,8 @@ class TestSaveConfiguration:
         source = inspect.getsource(InitCommand._save_configuration)
         assert '"model_lifecycle_enabled": config_data.get("model_lifecycle", {}).get("enabled", False)' in source
         assert '"guardrails_enabled": config_data.get("guardrails", {}).get("enabled", False)' in source
+        assert (
+            '"guardrails_safeguard_tier": config_data.get("guardrails", {}).get("safeguard_tier") or "CLASSIC"'
+            in source
+        )
         assert '"extra_models": config_data.get("extra_models", {})' in source

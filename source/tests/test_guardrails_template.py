@@ -95,9 +95,50 @@ def test_dashboard_name_is_regional_and_version_links_policy_revision():
 
     dashboard_name = resources["GuardrailsDashboard"]["Properties"]["DashboardName"]
     assert dashboard_name == "${GuardrailName}-${AWS::Region}-guardrails"
-    description = resources["GuardrailVersion"]["Properties"]["Description"]
+    condition, standard, classic = resources["GuardrailVersion"]["Properties"]["Description"]
+    assert condition == "UseStandardTier"
     assert params["PolicyRevision"]["Default"] == "v2"
     assert "Increment this value whenever any" in params["PolicyRevision"]["Description"]
-    assert "${ContentFilterStrength}" in description
-    assert "${PolicyRevision}" in description
-    assert "policy-v2" not in description
+    for description in (standard, classic):
+        assert "${ContentFilterStrength}" in description
+        assert "${PolicyRevision}" in description
+        assert "policy-v2" not in description
+
+
+def test_safeguard_tier_is_opt_in_and_classic_leaves_the_guardrail_unchanged():
+    """CLASSIC is the default and adds no tier, cross-Region or version-description change,
+    so existing stacks are not updated. The tier is part of the Standard version description
+    (F-019), so switching tiers replaces the immutable version."""
+    template = _template()
+    params = template["Parameters"]
+    guardrail = template["Resources"]["Guardrail"]["Properties"]
+
+    assert params["SafeguardTier"]["Default"] == "CLASSIC"
+    assert params["SafeguardTier"]["AllowedValues"] == ["CLASSIC", "STANDARD"]
+    assert params["GuardrailProfileId"]["Default"] == ""
+    # The loader drops the !Equals/!Ref tags, leaving their arguments.
+    assert template["Conditions"]["UseStandardTier"] == ["SafeguardTier", "STANDARD"]
+
+    assert guardrail["ContentPolicyConfig"]["ContentFiltersTierConfig"] == [
+        "UseStandardTier",
+        {"TierName": "STANDARD"},
+        "AWS::NoValue",
+    ]
+    condition, cross_region, no_value = guardrail["CrossRegionConfig"]
+    assert (condition, no_value) == ("UseStandardTier", "AWS::NoValue")
+    assert cross_region["GuardrailProfileArn"] == (
+        "arn:${AWS::Partition}:bedrock:${AWS::Region}:${AWS::AccountId}:guardrail-profile/${GuardrailProfileId}"
+    )
+
+    _, standard, classic = template["Resources"]["GuardrailVersion"]["Properties"]["Description"]
+    assert (
+        classic == "Immutable version for ${GuardrailName} strength ${ContentFilterStrength} policy ${PolicyRevision}"
+    )
+    assert "tier STANDARD profile ${GuardrailProfileId}" in standard
+
+
+def test_standard_tier_requires_a_guardrail_profile():
+    rule = _template()["Rules"]["StandardTierNeedsGuardrailProfile"]
+    assert rule["RuleCondition"] == ["SafeguardTier", "STANDARD"]
+    assert rule["Assertions"][0]["Assert"] == [["GuardrailProfileId", ""]]  # !Not [!Equals [!Ref ..., '']]
+    assert "GuardrailProfileId" in rule["Assertions"][0]["AssertDescription"]

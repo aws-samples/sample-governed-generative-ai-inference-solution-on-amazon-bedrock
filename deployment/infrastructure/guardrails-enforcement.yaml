@@ -12,6 +12,8 @@ Metadata:
         Parameters:
           - GuardrailName
           - ContentFilterStrength
+          - SafeguardTier
+          - GuardrailProfileId
           - PolicyRevision
       - Label:
           default: "Enforcement scope"
@@ -26,6 +28,10 @@ Metadata:
         default: "Guardrail name"
       ContentFilterStrength:
         default: "Content filter strength"
+      SafeguardTier:
+        default: "Content filter safeguard tier"
+      GuardrailProfileId:
+        default: "Guardrail profile ID (Standard tier only)"
       PolicyRevision:
         default: "Guardrail policy revision"
       ModelIncludeList:
@@ -45,6 +51,24 @@ Parameters:
     Default: MEDIUM
     AllowedValues: [LOW, MEDIUM, HIGH]
     Description: Input and output strength for every supported harmful-content category.
+
+  SafeguardTier:
+    Type: String
+    Default: CLASSIC
+    AllowedValues: [CLASSIC, STANDARD]
+    Description: >-
+      Content filter safeguard tier. STANDARD is more robust and supports more languages and
+      code-related prompts, and it requires cross-Region guardrail inference: prompts and
+      responses can be evaluated in other Regions of the guardrail profile's geography.
+
+  GuardrailProfileId:
+    Type: String
+    Default: ''
+    AllowedPattern: '^$|^[a-z0-9-]+[.]guardrail[.]v[0-9:]+$'
+    Description: >-
+      System-defined guardrail profile for cross-Region guardrail inference, for example
+      us.guardrail.v1:0 or eu.guardrail.v1:0. Required when SafeguardTier is STANDARD,
+      ignored otherwise.
 
   PolicyRevision:
     Type: String
@@ -67,20 +91,49 @@ Parameters:
     Default: ''
     Description: Optional customer-managed KMS key ARN for encrypting guardrail configuration.
 
+Rules:
+  StandardTierNeedsGuardrailProfile:
+    RuleCondition: !Equals [!Ref SafeguardTier, STANDARD]
+    Assertions:
+      - Assert: !Not [!Equals [!Ref GuardrailProfileId, '']]
+        AssertDescription: SafeguardTier STANDARD requires GuardrailProfileId (for example us.guardrail.v1:0).
+
 Conditions:
   HasModelIncludeList: !Not [!Equals [!Ref ModelIncludeList, '']]
   HasKmsKey: !Not [!Equals [!Ref KmsKeyArn, '']]
+  # Classic leaves the guardrail exactly as before (no tier or cross-Region settings).
+  UseStandardTier: !Equals [!Ref SafeguardTier, STANDARD]
 
 Resources:
   Guardrail:
     Type: AWS::Bedrock::Guardrail
+    # W1031 is needed only for CrossRegionConfig.GuardrailProfileArn: cfn-lint resolves
+    # its Sub with the parameter default (''), which can't match the ARN pattern. The ARN
+    # is only used for STANDARD, and the StandardTierNeedsGuardrailProfile rule rejects
+    # STANDARD with an empty profile ID. cfn-lint has no property-level ignore, so this
+    # also hides W1031 on the other Guardrail properties; test_guardrails_template.py
+    # pins the ARN shape.
+    Metadata:
+      cfn-lint:
+        config:
+          ignore_checks:
+            - W1031
     Properties:
       Name: !Ref GuardrailName
       Description: !Sub 'Governed Inference Platform on Amazon Bedrock enforced guardrail for ${AWS::StackName}'
       KmsKeyArn: !If [HasKmsKey, !Ref KmsKeyArn, !Ref AWS::NoValue]
       BlockedInputMessaging: This request was blocked by the organization's Bedrock guardrail policy.
       BlockedOutputsMessaging: This response was blocked by the organization's Bedrock guardrail policy.
+      # Standard tier requires cross-Region guardrail inference through a guardrail profile.
+      CrossRegionConfig: !If
+        - UseStandardTier
+        - GuardrailProfileArn: !Sub 'arn:${AWS::Partition}:bedrock:${AWS::Region}:${AWS::AccountId}:guardrail-profile/${GuardrailProfileId}'
+        - !Ref AWS::NoValue
       ContentPolicyConfig:
+        ContentFiltersTierConfig: !If
+          - UseStandardTier
+          - TierName: STANDARD
+          - !Ref AWS::NoValue
         # F-006/F-016: PROMPT_ATTACK is intentionally omitted. Bedrock supports
         # it only for input, and live validation showed it blocked agentic use.
         FiltersConfig:
@@ -129,7 +182,12 @@ Resources:
       GuardrailIdentifier: !GetAtt Guardrail.GuardrailArn
       # F-019: Changing the description replaces this immutable version and
       # prevents enforcement from remaining pinned to a stale policy snapshot.
-      Description: !Sub 'Immutable version for ${GuardrailName} strength ${ContentFilterStrength} policy ${PolicyRevision}'
+      # The tier is part of it only for Standard, so Classic stacks keep their
+      # existing description and version.
+      Description: !If
+        - UseStandardTier
+        - !Sub 'Immutable version for ${GuardrailName} strength ${ContentFilterStrength} tier STANDARD profile ${GuardrailProfileId} policy ${PolicyRevision}'
+        - !Sub 'Immutable version for ${GuardrailName} strength ${ContentFilterStrength} policy ${PolicyRevision}'
 
   EnforcedGuardrailConfiguration:
     Type: AWS::Bedrock::EnforcedGuardrailConfiguration

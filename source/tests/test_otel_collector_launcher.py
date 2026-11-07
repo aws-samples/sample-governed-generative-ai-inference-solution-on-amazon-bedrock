@@ -1,5 +1,5 @@
-# ABOUTME: Contract between the macOS/Linux package and the sidecar collector launcher:
-# ABOUTME: the shipped Go otel-helper must start ~/gip/otelcol from the paths install.sh writes.
+# ABOUTME: Contract between the packages and the sidecar collector launcher: the shipped Go
+# ABOUTME: otel-helper must start ~/gip/otelcol (otelcol.exe on Windows) from the paths the installers write.
 
 """Regression (end-to-end test, 2026-10-26): the sidecar collector never started.
 
@@ -38,10 +38,16 @@ def _go_func_body(path: Path, signature: str) -> str:
     return text[start:end]
 
 
-def test_go_otel_helper_starts_collector_on_macos_and_linux():
+def test_go_otel_helper_starts_collector_on_every_platform():
     collector = (GO_HELPER / "collector.go").read_text(encoding="utf-8")
-    assert collector.startswith("//go:build !windows\n"), "the launcher must be compiled for macOS and Linux"
+    assert "//go:build" not in collector.split("package main")[0], "the launcher must be compiled on every platform"
     assert "func ensureCollector(profile string)" in collector
+    # Windows has its own lock, liveness probe and binary name, not a no-op stub.
+    windows = (GO_HELPER / "collector_windows.go").read_text(encoding="utf-8")
+    assert windows.startswith("//go:build windows\n")
+    assert "func ensureCollector" not in windows
+    assert 'collectorBinarySuffix = ".exe"' in windows
+    assert (SOURCE / "go" / "internal" / "proc" / "proc_background_windows.go").is_file()
     # Every otelHeadersHelper invocation (normal and --test) goes through run().
     assert "ensureCollector(profile)" in _go_func_body(GO_HELPER / "main.go", "func run(testMode bool, profile string)")
 

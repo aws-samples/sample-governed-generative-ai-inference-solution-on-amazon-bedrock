@@ -693,22 +693,30 @@ def test_standard_installer_rejects_sudo_before_writes(tmp_path):
     assert not (home / "gip").exists()
 
 
-@pytest.mark.parametrize(
-    ("make_profile", "warned"),
-    [(_make_oidc_sidecar_profile, True), (_make_oidc_central_profile, False)],
-)
-def test_windows_installer_warns_that_the_sidecar_collector_does_not_start(tmp_path, make_profile, warned):
-    """Regression (review, 2026-10-27): on Windows nothing starts otelcol.exe in the normal path
-    (otel-helper.cmd reaches the .ps1 launcher only when otel-helper.exe fails), so usage never
-    reaches CloudWatch. Until a Windows launcher ships, install.bat says so in sidecar mode."""
+@pytest.mark.parametrize("make_profile", [_make_oidc_sidecar_profile, _make_oidc_central_profile])
+def test_windows_installer_has_no_sidecar_collector_warning(tmp_path, make_profile):
+    """The Go otel-helper now starts %USERPROFILE%\\gip\\otelcol.exe on Windows too
+    (cmd/otel-helper/collector.go), so install.bat no longer warns that it doesn't."""
     installer = PackageCommand()._create_windows_installer(tmp_path, make_profile()).read_text(encoding="utf-8")
 
-    warning = [line for line in installer.splitlines() if "sidecar collector is not started automatically" in line]
-    assert len(warning) == (1 if warned else 0)
-    if warned:
-        assert warning[0].startswith("echo WARNING:")
-        assert not set(warning[0]) & set("()!&|<>%^"), "batch metacharacters in an echo line"
-        assert installer.index(warning[0]) < installer.index("echo Installation complete")
+    assert "not started automatically" not in installer
+    assert "Known limitation" not in installer
+
+
+def test_windows_installer_stops_the_running_collector_before_replacing_files(tmp_path):
+    """The collector now runs on the normal path, and Windows can't replace a running .exe.
+    The install transaction stops only the installed otelcol.exe (matched by full path), and
+    only when the package ships a collector, before it moves any file."""
+    PackageCommand()._create_windows_installer(tmp_path, _make_oidc_sidecar_profile())
+    preflight = (tmp_path / "gip-install.ps1").read_text(encoding="utf-8")
+
+    stop = preflight.index("Get-Process -Name otelcol")
+    block = preflight[preflight.rindex("if ($installCollector) {", 0, stop) : stop]
+    assert '$collectorTarget = [IO.Path]::GetFullPath((Join-Path $install "otelcol.exe"))' in block
+    assert "-ieq $collectorTarget" in preflight[stop : stop + 300]
+    assert "Stop-Process -Force" in preflight[stop : stop + 300]
+    install_all = preflight.index("if ($InstallAll)")
+    assert install_all < stop < preflight.index("Invoke-GipFileTransaction $entries", install_all)
 
 
 def test_windows_manifest_is_recorded_before_success_prompt(tmp_path):

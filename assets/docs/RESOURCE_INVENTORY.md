@@ -40,11 +40,15 @@ All six managed templates expose optional `OidcThumbprintList` input. On an
 update, `gip deploy` discovers the provider with
 `cloudformation:DescribeStackResources`, reads its current list with
 `iam:GetOpenIDConnectProvider`, and passes that list back unchanged.
+The Direct STS role's `MaxSessionDuration` comes from the `MaxSessionDuration`
+parameter (3600–43200, default 43200); `gip deploy` sets it from the profile's
+`max_session_duration`.
 
 **IAM actions required for deployment:**
 - `cognito-identity:*`
 - `iam:CreateRole`, `iam:PutRolePolicy`, `iam:AttachRolePolicy`, `iam:CreateOpenIDConnectProvider`, `iam:CreatePolicy`
 - `iam:GetOpenIDConnectProvider` — `gip deploy` reads an existing provider's thumbprint list before updating the stack and passes it back (IAM rejects removing it)
+- `iam:UpdateRole` — changes an existing Direct STS role's `MaxSessionDuration` when `max_session_duration` changes
 - `logs:CreateLogGroup`, `logs:PutRetentionPolicy`
 
 ---
@@ -94,6 +98,8 @@ current value on update. Its primary outputs are `IdentityPoolId` and
 **IAM actions required for deployment:**
 - `bedrock:CreateGuardrail`, `bedrock:CreateGuardrailVersion`, plus the control-plane actions for `AWS::Bedrock::EnforcedGuardrailConfiguration` (account-level enforced guardrail configuration)
 - `cloudwatch:PutDashboard`
+- Standard tier only: the guardrail actions above on the guardrail profile too, `arn:aws:bedrock:<region>:<account>:guardrail-profile/<profile-id>` ([permissions](https://docs.aws.amazon.com/bedrock/latest/userguide/guardrail-profiles-permissions.html))
+- Standard tier only, read-only: `cloudformation:DescribeStackResource` on the auth stack, and `iam:GetPolicy` and `iam:GetPolicyVersion` on its `BedrockAccessPolicy`, so `gip deploy guardrails` can check the guardrail-profile grant (without them it warns and continues)
 
 **Scope warning:** the enforced configuration is **account-level per region**. With the default empty `ModelIncludeList`, the guardrail is enforced on every Bedrock model invocation in the account and region — not just Claude Code traffic.
 
@@ -336,7 +342,7 @@ monthly customer-managed-key charge.
 - `sqs:CreateQueue`
 - `cloudwatch:PutMetricAlarm`
 
-**Runtime/custom-resource note:** the logging-config custom resource Lambda calls `bedrock:GetModelInvocationLoggingConfiguration`, `bedrock:PutModelInvocationLoggingConfiguration`, and `bedrock:DeleteModelInvocationLoggingConfiguration` during stack create/update/delete — the `bedrock` namespace must be allowed. The Bedrock invocation logging configuration is a per-account, per-region **singleton**; if one already exists the stack fails closed unless `AdoptExistingConfig=true` (adopt mode only attaches a subscription filter to the existing log group). The processor Lambda performs cross-region DynamoDB `GetItem` plus transactional writes authorized by `PutItem`/`UpdateItem` against the quota stack's `UserQuotaMetrics` table. One of the five alarms (`MantleEndpointUsageAlarm`) is a Metrics Insights query alarm over the `AWS/BedrockMantle` namespace — a governance tripwire for unmetered bedrock-mantle endpoint usage. The DLQ's AWS-managed `alias/aws/sqs` reference creates no customer-managed key.
+**Runtime/custom-resource note:** the logging-config custom resource Lambda calls `bedrock:GetModelInvocationLoggingConfiguration`, `bedrock:PutModelInvocationLoggingConfiguration`, and `bedrock:DeleteModelInvocationLoggingConfiguration` during stack create/update/delete — the `bedrock` namespace must be allowed. The Bedrock invocation logging configuration is a per-account, per-region **singleton**; if one already exists the stack fails closed unless `AdoptExistingConfig=true` (adopt mode only attaches a subscription filter to the existing log group; `gip deploy metering` passes it when the profile sets `metering_adopt_existing_config`, and deleting the stack leaves an adopted configuration in place). The processor Lambda performs cross-region DynamoDB `GetItem` plus transactional writes authorized by `PutItem`/`UpdateItem` against the quota stack's `UserQuotaMetrics` table. One of the five alarms (`MantleEndpointUsageAlarm`) is a Metrics Insights query alarm over the `AWS/BedrockMantle` namespace — a governance tripwire for unmetered bedrock-mantle endpoint usage. The DLQ's AWS-managed `alias/aws/sqs` reference creates no customer-managed key.
 
 ---
 

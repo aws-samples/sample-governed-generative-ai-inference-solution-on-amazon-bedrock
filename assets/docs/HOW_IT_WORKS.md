@@ -110,7 +110,9 @@ anonymously only.
 Three details worth understanding:
 
 - **Credential source and expiry depend on mode.** Direct STS requests
-  `max_session_duration` (default 12 hours). Cognito's
+  `max_session_duration` (default 12 hours), and `gip deploy auth` sets the
+  federated role's `MaxSessionDuration` to the same value, so STS refuses a
+  longer session to any client. Cognito's
   `GetCredentialsForIdentity` response determines expiration; the helper does
   not pass `max_session_duration` to that API. IDC follows its SSO role/session
   configuration. Passthrough mode can return ambient static or otherwise
@@ -145,11 +147,13 @@ cooperative because it is the standard helper that acts on the decision.
 
 It does not cut off a session that is already running. A blocked user's
 existing credentials keep working until their issued expiration: Direct STS is
-bounded by `max_session_duration`, Cognito by the expiration returned from
+bounded by the role's `MaxSessionDuration` (the profile's `max_session_duration`
+once `gip deploy auth` has applied it), Cognito by the expiration returned from
 `GetCredentialsForIdentity`, and IDC by its permission-set role credentials.
 See [ADR-0009](adr/0009-enforcement-at-credential-issuance.md). It also does not
 prevent a modified OIDC client holding a valid token from bypassing
-credential-process and calling STS/Cognito directly. An IDC user can likewise
+credential-process and calling STS/Cognito directly, though STS still caps that
+client's Direct STS session at the role's `MaxSessionDuration`. An IDC user can likewise
 use role credentials obtained outside this helper without its quota check.
 IAM model/region policy and account guardrails still apply when those
 credentials use the GIP-created role. Hard-blocking every request requires

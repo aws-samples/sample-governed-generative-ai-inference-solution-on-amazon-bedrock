@@ -253,7 +253,7 @@ equally to Cline and Continue — they ride the same profile.)
 | Model inference with governed credentials | ✅ | ✅ OpenCode / Pi / Aider; ❌ Codex (Mantle endpoint denied, see [Codex](#openai-codex-cli)) |
 | **Per-user OTEL telemetry → solution dashboards** | ✅ emits OTEL metrics | ❌ do **not** feed the solution's dashboards |
 | **Per-user usage visibility** | OTEL dashboards + CUR | Session-name CUR attribution; plus, when deployed, server-side metering from Bedrock invocation logs covers **all harnesses identically** ([design](designs/server-side-metering-design.md)) |
-| **Default model via managed settings** | ✅ `managed-settings.json` sets it (OS-managed, highest precedence). It's a default, not a lock: `--model` and `ANTHROPIC_MODEL` still pick the session model, and only `availableModels` (not written by this sample) restricts the choice | ❌ managed-settings is Claude-Code-only; these harnesses rely on the IAM `RestrictToAnthropicModels` allow-list (any permitted Anthropic model is selectable) |
+| **Default model and optional model restriction via managed settings** | ✅ with `lock_default_model`, `managed-settings.json` (OS-managed, highest precedence) sets a default model, which is a default, not a lock. Adding `restrict_model_selection` restricts `/model` and `--model` to the model selected in `gip init` (Opus and Sonnet for opusplan) plus the Haiku-tier model, which background tasks use and users can also select, through `availableModels` and `enforceAvailableModels`; it needs Claude Code v2.1.175 or later. Both bind Claude Code only, and a local administrator can still edit the file | ❌ managed-settings is Claude-Code-only; these harnesses rely on the IAM `RestrictToAnthropicModels` allow-list (any permitted Anthropic model is selectable) |
 | **Web search (AgentCore gateway MCP)** | ✅ native `headersHelper` (see [Platform tools](#platform-tools-mcp)) | ✅ OpenCode / Codex via the `--mcp-proxy` stdio shim; ❌ Pi / Aider (no MCP support upstream) |
 | **Claude apps gateway** | ✅ optional gateway integration | ❌ Claude-Code-only; other harnesses keep direct Bedrock access |
 
@@ -265,10 +265,13 @@ Two practical consequences:
    [server-side metering design](designs/server-side-metering-design.md)
    closes the gap authoritatively for every harness (it meters Bedrock
    invocation logs, which no client can suppress).
-2. **Model governance shifts from settings to IAM.** Managed settings can set
-   Claude Code's default model, but that's a default, not a lock; the other
-   harnesses can pick any model the IAM policy allows. If a hard model allow-list matters,
-   enforce it in IAM (it already applies to every harness).
+2. **Model governance shifts from settings to IAM.** With `lock_default_model`,
+   managed settings set Claude Code's default model, which is a default, not a
+   lock. Adding `restrict_model_selection` restricts Claude Code's model
+   selection through `availableModels`. That restriction binds Claude Code only,
+   and a local administrator can still edit the file; the other harnesses can pick
+   any model the IAM policy allows. If a hard model allow-list matters, enforce it in
+   IAM (it already applies to every harness).
 
 ## Platform tools (MCP)
 

@@ -56,7 +56,7 @@ A harness that uses the AWS SDK default chain can use the same SSO login, quota 
 poetry run gip package --harnesses all
 ```
 
-See the [Harnesses Guide](assets/docs/HARNESSES.md) for per-harness setup and an honest capability matrix (telemetry dashboards and the managed-settings default model remain Claude-Code-only; per-user usage for other harnesses comes from CUR session-name attribution and optional [server-side metering](assets/docs/QUOTA_MONITORING.md#server-side-metering-tamper-proof-usage), which covers every harness identically). When [web search](assets/docs/WEB_SEARCH.md) is enabled, `gip package` also wires the gateway MCP endpoint into OpenCode and Codex CLI via a stdio proxy on the same binary (Pi and Aider have no MCP support upstream).
+See the [Harnesses Guide](assets/docs/HARNESSES.md) for per-harness setup and an honest capability matrix (telemetry dashboards and the managed-settings default model and optional model restriction remain Claude-Code-only; per-user usage for other harnesses comes from CUR session-name attribution and optional [server-side metering](assets/docs/QUOTA_MONITORING.md#server-side-metering-tamper-proof-usage), which covers every harness identically). When [web search](assets/docs/WEB_SEARCH.md) is enabled, `gip package` also wires the gateway MCP endpoint into OpenCode and Codex CLI via a stdio proxy on the same binary (Pi and Aider have no MCP support upstream).
 
 ## Key Features
 

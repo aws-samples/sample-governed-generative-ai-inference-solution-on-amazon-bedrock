@@ -64,6 +64,24 @@ class TestInstallBatSyntax:
     def bat_content(self):
         return _extract_install_bat()
 
+    @pytest.fixture
+    def generated_package(self, tmp_path):
+        """(install.bat, gip-install.ps1) as gip package writes them for a Windows build."""
+        from governed_inference_platform.cli.commands.package import PackageCommand
+        from governed_inference_platform.config import Profile
+
+        profile = Profile(
+            name="win",
+            provider_domain="auth.example.com",
+            client_id="client-abc",
+            credential_storage="session",
+            aws_region="us-east-1",
+            identity_pool_name="test-pool",
+            monitoring_enabled=False,
+        )
+        bat = PackageCommand()._create_windows_installer(tmp_path, profile).read_text(encoding="utf-8")
+        return bat, (tmp_path / "gip-install.ps1").read_text(encoding="utf-8")
+
     def test_starts_with_echo_off(self, bat_content):
         """Batch script must start with @echo off."""
         assert bat_content.strip().startswith("@echo off"), "install.bat must begin with @echo off"
@@ -101,13 +119,20 @@ class TestInstallBatSyntax:
             f"  • {v}" for v in violations
         )
 
-    def test_copies_credential_process(self, bat_content):
-        """install.bat must copy credential-process-windows.exe."""
-        assert "credential-process-windows.exe" in bat_content, "install.bat must copy the credential process binary"
+    def test_copies_credential_process(self, generated_package):
+        """install.bat runs the -InstallAll transaction, which stages credential-process-windows.exe."""
+        bat, ps1 = generated_package
+        assert 'gip-install.ps1" -InstallAll' in bat
+        assert (
+            'Add-GipInstallStage (Join-Path $package "credential-process-windows.exe") '
+            '"gip\\credential-process.exe" "gip/credential-process.exe"'
+        ) in ps1
 
-    def test_copies_config_json(self, bat_content):
-        """install.bat must copy config.json to the install directory."""
-        assert "config.json" in bat_content, "install.bat must copy config.json"
+    def test_copies_config_json(self, generated_package):
+        """The -InstallAll transaction stages config.json into %USERPROFILE%\\gip."""
+        bat, ps1 = generated_package
+        assert 'gip-install.ps1" -InstallAll' in bat
+        assert 'Add-GipInstallStage (Join-Path $package "config.json") "gip\\config.json" "gip/config.json"' in ps1
 
     def test_has_error_handling_after_copy(self, bat_content):
         """Installed files use the transaction helper rather than blind copies."""

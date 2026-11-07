@@ -107,11 +107,16 @@ type ProfileConfig struct {
 	MonitoringMode        string `json:"monitoring_mode,omitempty"`         // "central" (ECS Fargate) | "sidecar" (local collector)
 	OtelCollectorEndpoint string `json:"otel_collector_endpoint,omitempty"` // ALB/collector URL for OTLP export
 
+	// Managed-settings model restriction (gip package writes availableModels when this and
+	// lock_default_model are set). The credential helper does not consume it; schema parity only.
+	RestrictModelSelection bool `json:"restrict_model_selection,omitempty"`
+
 	// Bedrock Guardrails account-level enforcement. The Go credential helper does
 	// not enforce these values, but it must preserve config parity with Python.
 	GuardrailsEnabled               bool     `json:"guardrails_enabled,omitempty"`
 	GuardrailsName                  string   `json:"guardrails_name,omitempty"`
 	GuardrailsContentFilterStrength string   `json:"guardrails_content_filter_strength,omitempty"`
+	GuardrailsSafeguardTier         string   `json:"guardrails_safeguard_tier,omitempty"`
 	GuardrailsModelIncludeList      []string `json:"guardrails_model_include_list,omitempty"`
 	GuardrailsKMSKeyARN             string   `json:"guardrails_kms_key_arn,omitempty"`
 

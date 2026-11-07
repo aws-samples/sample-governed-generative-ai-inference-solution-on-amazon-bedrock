@@ -373,7 +373,7 @@ def test_manifest_rewrite_preserves_concurrent_change(tmp_path, monkeypatch):
     assert json.loads((install / ".gip-ownership.json").read_text(encoding="utf-8")) == {"concurrent": True}
 
 
-@pytest.mark.skipif(os.name == "nt", reason="exercises the POSIX ps/kill path; Windows leaves the collector running")
+@pytest.mark.skipif(os.name == "nt", reason="exercises the POSIX ps/kill path")
 def test_runtime_collector_pid_is_stopped_only_for_exact_install_command(tmp_path, monkeypatch):
     monkeypatch.setattr(Path, "home", classmethod(lambda cls: tmp_path))
     install = tmp_path / "gip"
@@ -480,7 +480,7 @@ def test_crlf_aws_sections_match_canonical_manifest_digest(tmp_path, monkeypatch
     assert _command()._matching_profile_section(manifest, aws_config, "gip", None) == _digest(canonical)
 
 
-@pytest.mark.skipif(os.name == "nt", reason="exercises the POSIX ps/kill path; Windows leaves the collector running")
+@pytest.mark.skipif(os.name == "nt", reason="exercises the POSIX ps/kill path")
 def test_verified_collector_that_exits_before_stop_removes_stale_pid(tmp_path, monkeypatch):
     monkeypatch.setattr(Path, "home", classmethod(lambda cls: tmp_path))
     install = tmp_path / "gip"
@@ -496,22 +496,162 @@ def test_verified_collector_that_exits_before_stop_removes_stale_pid(tmp_path, m
     assert not pid_file.exists()
 
 
-@pytest.mark.skipif(os.name != "nt", reason="Windows-only behaviour")
-def test_windows_leaves_collector_running_and_keeps_pid_file(tmp_path, monkeypatch):
-    """Windows cannot verify the collector's command line, so cleanup must not kill or unlink."""
+def _windows_collector(install: Path, *, binary=None, config=None):
+    """What Win32_Process reports for a collector: executable path, newline, command line."""
+    binary = binary or install / "otelcol.exe"
+    config = config or install / "collector-config.yaml"
+    return type("Process", (), {"returncode": 0, "stdout": f'{binary}\n"{binary}" --config {config}', "stderr": ""})()
+
+
+def test_windows_collector_identity_comes_from_win32_process_case_insensitively(tmp_path, monkeypatch):
+    """Windows has no ps: cleanup reads the executable path and command line through CIM, and
+    Windows paths compare case-insensitively."""
     monkeypatch.setattr(Path, "home", classmethod(lambda cls: tmp_path))
+    monkeypatch.setattr(CleanupCommand, "_is_windows", staticmethod(lambda: True))
+    install = tmp_path / "gip"
+    install.mkdir()
+    pid_file = install / "collector.pid"
+    pid_file.write_text("1234\r\n", encoding="utf-8")
+    shouting = _windows_collector(install)
+    shouting.stdout = shouting.stdout.upper()
+
+    with patch("governed_inference_platform.cli.commands.cleanup.subprocess.run", return_value=shouting) as run:
+        matched = CleanupCommand._matching_collector_pid(pid_file, install)
+
+    assert matched == (pid_file, _digest("1234\r\n"))
+    argv = run.call_args.args[0]
+    assert argv[:4] == ["powershell.exe", "-NoProfile", "-NonInteractive", "-Command"]
+    assert "Get-CimInstance Win32_Process -Filter 'ProcessId = 1234'" in argv[4]
+
+
+def test_windows_verified_collector_is_stopped_and_waited_for(tmp_path, monkeypatch):
+    monkeypatch.setattr(Path, "home", classmethod(lambda cls: tmp_path))
+    monkeypatch.setattr(CleanupCommand, "_is_windows", staticmethod(lambda: True))
+    install = tmp_path / "gip"
+    install.mkdir()
+    pid_file = install / "collector.pid"
+    pid_file.write_text("1234\n", encoding="utf-8")
+    stopped = type("Process", (), {"returncode": 0, "stdout": "", "stderr": ""})()
+    gone = type("Process", (), {"returncode": 3, "stdout": "", "stderr": ""})()  # the lookup's not-found exit
+    console = type("Console", (), {"print": lambda self, *_args, **_kwargs: None})()
+
+    with (
+        patch(
+            "governed_inference_platform.cli.commands.cleanup.subprocess.run",
+            side_effect=[_windows_collector(install), stopped, gone],
+        ) as run,
+        patch("governed_inference_platform.cli.commands.cleanup.os.kill") as kill,
+    ):
+        assert _command()._stop_owned_collector(pid_file, _digest("1234\n"), install, console)
+
+    stop_script = run.call_args_list[1].args[0][4]
+    assert stop_script.startswith("$p = Get-Process -Id 1234 -ErrorAction SilentlyContinue;")
+    assert "Stop-Process -InputObject $p -Force -ErrorAction Stop" in stop_script
+    assert "$p.WaitForExit(10000)" in stop_script
+    kill.assert_not_called()
+    assert not pid_file.exists()
+
+
+def test_windows_stop_counts_as_success_when_the_process_is_gone_whatever_the_script_exit(tmp_path, monkeypatch):
+    """A collector that exits between Stop-Process and the wait can make PowerShell exit non-zero.
+    Cleanup decides from a fresh lookup instead, so that sequence is not reported as a failure."""
+    monkeypatch.setattr(Path, "home", classmethod(lambda cls: tmp_path))
+    monkeypatch.setattr(CleanupCommand, "_is_windows", staticmethod(lambda: True))
+    install = tmp_path / "gip"
+    install.mkdir()
+    pid_file = install / "collector.pid"
+    pid_file.write_text("1234\n", encoding="utf-8")
+    script_error = type("Process", (), {"returncode": 1, "stdout": "", "stderr": "Cannot find a process"})()
+    gone = type("Process", (), {"returncode": 3, "stdout": "", "stderr": ""})()  # the lookup's not-found exit
+    console = type("Console", (), {"print": lambda self, *_args, **_kwargs: None})()
+
+    with patch(
+        "governed_inference_platform.cli.commands.cleanup.subprocess.run",
+        side_effect=[_windows_collector(install), script_error, gone],
+    ):
+        assert _command()._stop_owned_collector(pid_file, _digest("1234\n"), install, console)
+
+    assert not pid_file.exists()
+
+
+def test_windows_identity_lookup_reads_utf8_so_non_ascii_paths_match(tmp_path, monkeypatch):
+    monkeypatch.setattr(Path, "home", classmethod(lambda cls: tmp_path))
+    monkeypatch.setattr(CleanupCommand, "_is_windows", staticmethod(lambda: True))
+    install = tmp_path / "Mu\u00f1oz" / "gip"
+    install.mkdir(parents=True)
+    pid_file = install / "collector.pid"
+    pid_file.write_text("1234\n", encoding="utf-8")
+
+    with patch(
+        "governed_inference_platform.cli.commands.cleanup.subprocess.run", return_value=_windows_collector(install)
+    ) as run:
+        assert CleanupCommand._matching_collector_pid(pid_file, install) == (pid_file, _digest("1234\n"))
+
+    assert run.call_args.kwargs["encoding"] == "utf-8"
+    assert "[Console]::OutputEncoding = [System.Text.UTF8Encoding]::new($false)" in run.call_args.args[0][4]
+
+
+@pytest.mark.parametrize(
+    "process",
+    [
+        "other binary",
+        "other config",
+        "stop fails",
+    ],
+)
+def test_windows_unverified_or_unstoppable_collector_keeps_pid_file(tmp_path, monkeypatch, process):
+    monkeypatch.setattr(Path, "home", classmethod(lambda cls: tmp_path))
+    monkeypatch.setattr(CleanupCommand, "_is_windows", staticmethod(lambda: True))
     install = tmp_path / "gip"
     install.mkdir()
     pid_file = install / "collector.pid"
     pid_file.write_text("1234\n", encoding="utf-8")
     console = type("Console", (), {"print": lambda self, *_args, **_kwargs: None})()
+    failed = type("Process", (), {"returncode": 1, "stdout": "", "stderr": "Access is denied"})()
+    responses = {
+        "other binary": [_windows_collector(install, binary=tmp_path / "elsewhere" / "otelcol.exe")],
+        "other config": [_windows_collector(install, config=tmp_path / "other.yaml")],
+        # the stop is refused and the fresh lookup still finds the collector
+        "stop fails": [_windows_collector(install), failed, _windows_collector(install)],
+    }[process]
 
-    with (
-        patch("governed_inference_platform.cli.commands.cleanup.subprocess.run") as run,
-        patch("governed_inference_platform.cli.commands.cleanup.os.kill") as kill,
+    with patch("governed_inference_platform.cli.commands.cleanup.subprocess.run", side_effect=responses) as run:
+        if process != "stop fails":
+            assert CleanupCommand._matching_collector_pid(pid_file, install) is None
+            run.reset_mock(side_effect=True)
+            run.side_effect = list(responses)
+        assert not _command()._stop_owned_collector(pid_file, _digest("1234\n"), install, console)
+
+    assert run.call_count == len(responses)
+    assert pid_file.exists()
+
+
+def test_windows_failed_lookup_after_stop_is_not_taken_as_stopped(tmp_path, monkeypatch):
+    """A lookup that fails (exit other than 0 or the not-found code) must not count as "gone":
+    cleanup keeps the pid file and reports failure instead of claiming the collector stopped."""
+    monkeypatch.setattr(Path, "home", classmethod(lambda cls: tmp_path))
+    monkeypatch.setattr(CleanupCommand, "_is_windows", staticmethod(lambda: True))
+    install = tmp_path / "gip"
+    install.mkdir()
+    pid_file = install / "collector.pid"
+    pid_file.write_text("1234\n", encoding="utf-8")
+    refused = type("Process", (), {"returncode": 1, "stdout": "", "stderr": "Access is denied"})()
+    lookup_failed = type("Process", (), {"returncode": 1, "stdout": "", "stderr": "Invalid class"})()
+    console = type("Console", (), {"print": lambda self, *_args, **_kwargs: None})()
+
+    with patch(
+        "governed_inference_platform.cli.commands.cleanup.subprocess.run",
+        side_effect=[_windows_collector(install), refused, lookup_failed],
     ):
         assert not _command()._stop_owned_collector(pid_file, _digest("1234\n"), install, console)
 
-    run.assert_not_called()
-    kill.assert_not_called()
     assert pid_file.exists()
+
+
+def test_windows_lookup_uses_a_distinct_not_found_exit(tmp_path, monkeypatch):
+    monkeypatch.setattr(CleanupCommand, "_is_windows", staticmethod(lambda: True))
+    gone = type("Process", (), {"returncode": 3, "stdout": "", "stderr": ""})()
+    with patch("governed_inference_platform.cli.commands.cleanup.subprocess.run", return_value=gone) as run:
+        assert CleanupCommand._process_command(1234) == (False, "")
+    script = run.call_args.args[0][4]
+    assert "-ErrorAction Stop" in script and "if ($null -eq $p) { exit 3 }" in script

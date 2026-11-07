@@ -112,7 +112,7 @@ ALLOWED_KEYS: dict[str, Any] = {
         "check_interval": None,
         "enable_bypass_detection": None,
     },
-    "metering": {"enabled": None, "mode": None},
+    "metering": {"enabled": None, "mode": None, "adopt_existing_config": None},
     "codebuild": {"enabled": None, "region": None, "prior_regions": None},
     "web_search": {"enabled": None, "entitled_groups": None, "policy_mode": None},
     "memory": {
@@ -135,6 +135,7 @@ ALLOWED_KEYS: dict[str, Any] = {
         "enabled": None,
         "name": None,
         "content_filter_strength": None,
+        "safeguard_tier": None,
         "model_include_list": None,
         "kms_key_arn": None,
     },
@@ -148,6 +149,7 @@ ALLOWED_KEYS: dict[str, Any] = {
     "cowork": {"config_delivery": None},
     "settings_target": None,
     "lock_default_model": None,
+    "restrict_model_selection": None,
     "distribution": {
         "enabled": None,
         "type": None,
@@ -247,7 +249,7 @@ DEFAULTS: dict[str, Any] = {
         "check_interval": 30,
         "enable_bypass_detection": False,
     },
-    "metering": {"enabled": False, "mode": "shadow"},
+    "metering": {"enabled": False, "mode": "shadow", "adopt_existing_config": False},
     "codebuild": {"enabled": False, "region": None, "prior_regions": []},
     "web_search": {"enabled": False, "entitled_groups": [], "policy_mode": "LOG_ONLY"},
     "memory": {
@@ -270,6 +272,7 @@ DEFAULTS: dict[str, Any] = {
         "enabled": False,
         "name": "",
         "content_filter_strength": "MEDIUM",
+        "safeguard_tier": "CLASSIC",
         "model_include_list": [],
         "kms_key_arn": None,
     },
@@ -283,6 +286,7 @@ DEFAULTS: dict[str, Any] = {
     "cowork": {"config_delivery": "static"},
     "settings_target": "user",
     "lock_default_model": False,
+    "restrict_model_selection": False,
     "distribution": {
         "enabled": False,
         "type": None,
@@ -822,9 +826,17 @@ def validate_config(config: dict[str, Any]) -> list[str]:
         errors.append(f"metering.mode: must be 'shadow' or 'max' (got '{metering.get('mode')}')")
     if metering.get("enabled") and not quota.get("enabled"):
         errors.append("metering.enabled: server-side metering requires quota.enabled=true")
+    if not isinstance(metering.get("adopt_existing_config"), bool):
+        errors.append(
+            f"metering.adopt_existing_config: must be true or false (got '{metering.get('adopt_existing_config')}')"
+        )
 
     if config.get("settings_target") not in ("user", "managed"):
         errors.append(f"settings_target: must be 'user' or 'managed' (got '{config.get('settings_target')}')")
+    if not isinstance(config.get("restrict_model_selection"), bool):
+        errors.append(
+            f"restrict_model_selection: must be true or false (got '{config.get('restrict_model_selection')}')"
+        )
 
     web_search = config.get("web_search", {})
     entitled_groups = web_search.get("entitled_groups")
@@ -870,6 +882,10 @@ def validate_config(config: dict[str, Any]) -> list[str]:
             "guardrails.content_filter_strength: must be LOW, MEDIUM, or HIGH "
             f"(got '{guardrails.get('content_filter_strength')}')"
         )
+    if guardrails.get("safeguard_tier") not in ("CLASSIC", "STANDARD"):
+        errors.append(
+            f"guardrails.safeguard_tier: must be CLASSIC or STANDARD (got '{guardrails.get('safeguard_tier')}')"
+        )
     include_list = guardrails.get("model_include_list")
     if include_list is not None and (
         not isinstance(include_list, list)
@@ -879,6 +895,36 @@ def validate_config(config: dict[str, Any]) -> list[str]:
             "guardrails.model_include_list: must be a list of non-empty model IDs without commas "
             f"(got '{include_list}')"
         )
+    elif include_list:
+        from governed_inference_platform.models import invalid_guardrail_include_ids
+
+        rejected = invalid_guardrail_include_ids(include_list)
+        if rejected:
+            errors.append(
+                f"guardrails.model_include_list: Bedrock enforcement doesn't accept {', '.join(rejected)}; "
+                "use foundation-model IDs such as anthropic.claude-haiku-4-5-20251001-v1:0, not cross-Region "
+                "inference profile IDs (us.anthropic...)"
+            )
+    if guardrails.get("enabled") is True and guardrails.get("safeguard_tier") == "STANDARD":
+        # Same hard stops as `gip deploy guardrails` (deploy.guardrails_tier_plan): an empty
+        # allowed_bedrock_regions list, or no guardrails Region that can use Standard. Regions without
+        # a guardrail profile, or whose profile leaves a residency geography, fall back to Classic.
+        from types import SimpleNamespace
+
+        from governed_inference_platform.cli.commands.deploy import guardrails_tier_plan
+
+        aws_answers = config.get("aws", {})
+        allowed = aws_answers.get("allowed_bedrock_regions")
+        if aws_answers.get("region") and (allowed is None or isinstance(allowed, list)):
+            target = SimpleNamespace(
+                aws_region=aws_answers["region"],
+                allowed_bedrock_regions=allowed or [],
+                cross_region_profile=aws_answers.get("cross_region_profile"),
+                guardrails_safeguard_tier="STANDARD",
+            )
+            _, stop = guardrails_tier_plan(target)
+            if stop:
+                errors.append(f"guardrails.safeguard_tier: {stop}")
     guardrail_name = guardrails.get("name")
     if guardrail_name and not re.match(r"^[0-9A-Za-z-_]{1,50}$", str(guardrail_name)):
         errors.append(f"guardrails.name: must match ^[0-9A-Za-z-_]{{1,50}}$ (got '{guardrail_name}')")
@@ -986,10 +1032,10 @@ def build_answers_from_profile(command, profile_name: str) -> dict[str, Any]:
     answers["cowork_3p"]["chat_tab_enabled"] = profile.cowork_chat_tab_enabled
     answers["cowork_3p"]["chat_advanced_file_analysis"] = profile.cowork_chat_advanced_file_analysis
     answers.setdefault("cowork", {})["config_delivery"] = "static"
-    answers["metering"] = {
-        "enabled": profile.metering_enabled,
-        "mode": profile.metering_mode,
-    }
+    # metering (enabled, mode, adopt_existing_config) comes from _check_existing_deployment.
+    # _check_existing_deployment also derives quota.monthly_limit_millions as the wizard's
+    # prompt default; it is not an answers key (quota.monthly_limit carries the value).
+    answers.get("quota", {}).pop("monthly_limit_millions", None)
 
     return _prune_none(answers)
 
@@ -1032,11 +1078,24 @@ def _print_summary(console: Console, config: dict[str, Any], profile_name: str) 
     guardrails = config.get("guardrails", {})
     console.print(
         "  Guardrails:       "
-        + (f"enabled ({guardrails.get('content_filter_strength')})" if guardrails.get("enabled") else "disabled")
+        + (
+            f"enabled ({guardrails.get('content_filter_strength')}, {guardrails.get('safeguard_tier') or 'CLASSIC'} tier)"
+            if guardrails.get("enabled")
+            else "disabled"
+        )
     )
     dist = config["distribution"]
     console.print(f"  Distribution:     {dist.get('type') or 'disabled'}")
     console.print(f"  Settings target:  {config.get('settings_target')}")
+
+    if config.get("restrict_model_selection") and not (
+        config.get("settings_target") == "managed" and config.get("lock_default_model")
+    ):
+        console.print(
+            "\n[yellow]⚠ restrict_model_selection has no effect without settings_target: managed and "
+            "lock_default_model: true.[/yellow]",
+            soft_wrap=True,
+        )
 
     # Data-residency advisory (non-blocking) — same check as the wizard's review step
     from governed_inference_platform.cli.utils.residency import residency_warnings
