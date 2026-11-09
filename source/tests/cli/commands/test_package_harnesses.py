@@ -67,6 +67,13 @@ class TestHarnessesAll:
         assert (tmp_path / "harnesses" / "README.md").exists()
         assert (tmp_path / "harnesses" / "opencode" / "opencode.json").exists()
         assert (tmp_path / "harnesses" / "codex" / "config.toml").exists()
+        # ChatGPT desktop app / IDE extension env file (ADR-0037), installed with the rest of harnesses/
+        assert (tmp_path / "harnesses" / "codex" / "codex.env").read_text().count("AWS_PROFILE=") == 1
+        # Optional admin requirements.toml ships next to config.toml (not auto-applied)
+        assert (
+            'model_provider = "amazon-bedrock-runtime"'
+            in (tmp_path / "harnesses" / "codex" / "requirements.toml").read_text()
+        )
         assert (tmp_path / "harnesses" / "pi" / "pi-bedrock.env").exists()
         assert (tmp_path / "harnesses" / "aider" / ".aider.conf.yml").exists()
 

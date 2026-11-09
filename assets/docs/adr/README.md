@@ -42,6 +42,7 @@ in this repository.
 | [0034](0034-single-attempt-quota-fail-closed.md) | Keep quota checks single-attempt and fail-closed | Accepted | Retry experiments leaked workers/sockets in the legacy provider; alarms and explicit break-glass mode mitigate transient denial until a cancellable transport exists. |
 | [0035](0035-mirror-upstream-claude-apps-gateway.md) | Mirror upstream Claude Apps Gateway without local forks | Accepted; delivery mechanism superseded by 0036 | Exact gateway/Desktop subtrees, pinned provenance, tested PR-only sync, legacy destroy-only migration. |
 | [0036](0036-verified-fetch-claude-apps-gateway.md) | Deliver the pinned Claude Apps Gateway source by verified fetch, not a committed mirror | Accepted; supersedes 0035's mechanism | Subtrees untracked; versioned Git-tree reconstruction verifies path, type, executable mode, symlink target, and bytes and fails closed. Reason: security findings on third-party Dockerfiles/CDK cannot be suppressed without forking upstream. |
+| [0037](0037-openai-models-on-bedrock-runtime.md) | Admit OpenAI models on bedrock-runtime for ChatGPT Work and Codex; Mantle stays denied | Accepted; live-verified | Opt-in `AllowOpenAIModels` grants `bedrock:InvokeModel` on four live-verified resources; budgets need metering `max`; EU/AU/JP reach the GPT-5.x/6.x models only via Global CRIS. |
 
 ADR-0029 is reserved by the in-flight Agent Registry migration lane (W7-REG).
 

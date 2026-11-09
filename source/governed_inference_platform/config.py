@@ -73,6 +73,10 @@ class Profile:
     # host cert is signed by a private CA (see IAM_OIDC_THUMBPRINT_GUIDE_URL). Older profiles
     # that carry a value keep deploying it unchanged.
     oidc_thumbprint: str | None = None
+    # Space-separated OAuth scopes for provider_type "generic". None keeps the
+    # credential providers' default. OneLogin rejects offline_access on the
+    # authorization-code flow, so OneLogin profiles set "openid profile email groups".
+    oidc_scopes: str | None = None
     oidc_prompt: str | None = None  # OIDC prompt param for Azure auth (default "select_account", "" to skip)
     enable_codebuild: bool = False  # Enable CodeBuild for Windows binary builds
     codebuild_region: str | None = None  # Region for CodeBuild stack/builds; falls back to aws_region when unset
@@ -213,6 +217,10 @@ class Profile:
     inference_profile_sonnet_arn: str | None = None  # Optional inference profile ARN for Sonnet tier
     inference_profile_haiku_arn: str | None = None  # Optional inference profile ARN for Haiku tier
     restrict_to_anthropic_models: bool = True  # Deploy auth stacks with server-side Anthropic model scoping by default
+    # ADR-0037: also admit OpenAI models on bedrock-runtime (ChatGPT Work / Codex
+    # `amazon-bedrock-runtime` provider). Deploy-side only, like the field above:
+    # maps to the auth stacks' AllowOpenAIModels parameter. Mantle stays denied.
+    allow_openai_models: bool = False
 
     # Claude Code settings configuration
     include_coauthored_by: bool = True  # Whether to include "co-authored-by Claude" in git commits

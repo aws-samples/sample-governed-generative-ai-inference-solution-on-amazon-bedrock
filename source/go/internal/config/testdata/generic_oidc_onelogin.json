@@ -1,0 +1,20 @@
+{
+  "profiles": {
+    "gip": {
+      "provider_domain": "example.onelogin.com",
+      "client_id": "00000000-0000-0000-0000-000000000000",
+      "provider_type": "generic",
+      "aws_region": "us-east-1",
+      "credential_storage": "keyring",
+      "federation_type": "direct",
+      "federated_role_arn": "arn:aws:iam::123456789012:role/BedrockFederatedRole",
+      "max_session_duration": 43200,
+      "oidc_issuer_url": "https://example.onelogin.com/oidc/2",
+      "oidc_authorization_endpoint": "https://example.onelogin.com/oidc/2/auth",
+      "oidc_token_endpoint": "https://example.onelogin.com/oidc/2/token",
+      "oidc_jwks_uri": "https://example.onelogin.com/oidc/2/certs",
+      "redirect_port": 8401,
+      "oidc_scopes": "openid profile email groups"
+    }
+  }
+}

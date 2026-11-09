@@ -35,7 +35,7 @@ def build(svg_dir, png_dir=None):
     d.node("cc", "Res_Client_48_Light", 130, 166, "Claude Code", ["CLI harness"])
     d.node("cd", "Res_Client_48_Light", 130, 470, "Claude Desktop", ["Chat, Cowork, Code"])
     d.node("sdk", "Res_Client_48_Light", 130, 820, ["Other AWS SDK", "clients"],
-           ["OpenCode, Pi, Aider,", "internal apps (any SDK host),", "Codex CLI: MCP tools only"])
+           ["OpenCode, Pi, Aider,", "internal apps (any SDK host),", "ChatGPT Work and Codex"])
     d.text(130, 1236, ["credential-process and", "otel-helper, installed", "by gip package"], 15, "#545B64", lh=18)
 
     card(d, "auth", "Authentication (core)", ["gip deploy auth"],
@@ -68,11 +68,11 @@ def build(svg_dir, png_dir=None):
          ["Presigned URLs or a landing", "page behind IdP sign-in"])
 
     d.node("bedrock", "Arch_Amazon-Bedrock_48", BED[0], BED[1], "Amazon Bedrock",
-           ["Claude models", "AWS service, not", "deployed by GIP"], pos="above")
+           ["Claude models,", "OpenAI models", "AWS service, not", "deployed by GIP"], pos="above")
 
     d.edge([(DEV_R, cy("auth")), (CX0, cy("auth"))], "credential-process federation", dashed=True, at=MID)
     d.edge([(DEV_R, BED[1]), (BED[0] - 32, BED[1])], "invoke, temporary credentials", at=MID,
-           sub=["all clients except Codex CLI"])
+           sub=["all clients"])
     d.edge([(DEV_R, cy("gw")), (CX0, cy("gw"))], "gateway sign-in (OIDC)", dashed=True, at=MID,
            sub=["Claude Code, Claude Desktop"])
     d.edge([(DEV_R, cy("quota")), (CX0, cy("quota"))], "quota check before STS", dashed=True, at=MID)

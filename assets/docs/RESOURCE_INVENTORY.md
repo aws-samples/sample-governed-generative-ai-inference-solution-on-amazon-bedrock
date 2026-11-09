@@ -101,7 +101,7 @@ current value on update. Its primary outputs are `IdentityPoolId` and
 - Standard tier only: the guardrail actions above on the guardrail profile too, `arn:aws:bedrock:<region>:<account>:guardrail-profile/<profile-id>` ([permissions](https://docs.aws.amazon.com/bedrock/latest/userguide/guardrail-profiles-permissions.html))
 - Standard tier only, read-only: `cloudformation:DescribeStackResource` on the auth stack, and `iam:GetPolicy` and `iam:GetPolicyVersion` on its `BedrockAccessPolicy`, so `gip deploy guardrails` can check the guardrail-profile grant (without them it warns and continues)
 
-**Scope warning:** the enforced configuration is **account-level per region**. With the default empty `ModelIncludeList`, the guardrail is enforced on every Bedrock model invocation in the account and region — not just Claude Code traffic.
+**Scope warning:** the enforced configuration is **account-level per region**. With the default empty `ModelIncludeList`, the guardrail is enforced on every Bedrock model invocation in the account and region — not just Claude Code traffic. Whether it applies to OpenAI Responses API calls is unverified ([Guardrails](GUARDRAILS.md)).
 
 ---
 

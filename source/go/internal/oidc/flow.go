@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"net/url"
 	"os"
+	"strings"
 	"time"
 
 	"gip-go/internal/browser"
@@ -23,6 +24,22 @@ type AuthResult struct {
 type GenericEndpoints struct {
 	AuthorizeURL string
 	TokenURL     string
+	// Scopes overrides the default "openid profile email offline_access" when
+	// non-empty. OneLogin rejects offline_access on the authorization-code
+	// flow ("will return an error if provided"), so its profiles set
+	// "openid profile email groups" here. Empty keeps the default.
+	Scopes string
+}
+
+// authScopes returns the scope parameter for the authorization request: the
+// generic provider's configured override when set, else the provider default.
+func authScopes(providerType string, provCfg provider.Config, generic *GenericEndpoints) string {
+	if providerType == "generic" && generic != nil {
+		if s := strings.TrimSpace(generic.Scopes); s != "" {
+			return s
+		}
+	}
+	return provCfg.Scopes
 }
 
 // Authenticate performs the full OIDC authorization code flow with PKCE.
@@ -62,7 +79,7 @@ func Authenticate(providerDomain, clientID, providerType, oktaAuthServerID strin
 	params := url.Values{
 		"client_id":             {clientID},
 		"response_type":        {provCfg.ResponseType},
-		"scope":                {provCfg.Scopes},
+		"scope":                {authScopes(providerType, provCfg, generic)},
 		"redirect_uri":         {redirectURI},
 		"state":                {state},
 		"nonce":                {nonce},

@@ -55,6 +55,7 @@ ALLOWED_KEYS: dict[str, Any] = {
     "oidc_token_endpoint": None,
     "oidc_jwks_uri": None,
     "oidc_thumbprint": None,
+    "oidc_scopes": None,
     "azure_auth_mode": None,
     "client_certificate_path": None,
     "client_certificate_key_path": None,
@@ -79,6 +80,7 @@ ALLOWED_KEYS: dict[str, Any] = {
         "inference_profile_opus_arn": None,
         "inference_profile_sonnet_arn": None,
         "inference_profile_haiku_arn": None,
+        "allow_openai_models": None,
     },
     "monitoring": {
         "enabled": None,
@@ -199,6 +201,7 @@ DEFAULTS: dict[str, Any] = {
     "oidc_token_endpoint": None,
     "oidc_jwks_uri": None,
     "oidc_thumbprint": None,
+    "oidc_scopes": None,
     "azure_auth_mode": None,  # derived: "public" when provider_type == "azure"
     "client_certificate_path": None,
     "client_certificate_key_path": None,
@@ -223,6 +226,7 @@ DEFAULTS: dict[str, Any] = {
         "inference_profile_opus_arn": None,
         "inference_profile_sonnet_arn": None,
         "inference_profile_haiku_arn": None,
+        "allow_openai_models": False,  # ADR-0037: OpenAI on bedrock-runtime (ChatGPT Work / Codex)
     },
     "monitoring": {
         "enabled": True,
@@ -694,6 +698,10 @@ def validate_config(config: dict[str, Any]) -> list[str]:
             issuer = config.get("oidc_issuer_url")
             if issuer and not issuer.startswith("https://"):
                 errors.append("oidc_issuer_url: must start with https://")
+            # oidc_scopes is optional (OneLogin rejects the default offline_access scope).
+            scopes = config.get("oidc_scopes")
+            if scopes is not None and (not isinstance(scopes, str) or "openid" not in scopes.split()):
+                errors.append("oidc_scopes: must be a space-separated string that includes 'openid'")
             # oidc_thumbprint is optional: IAM retrieves the CA thumbprint itself when the
             # template omits ThumbprintList. Validate the format only when a value is given.
             thumbprint = config.get("oidc_thumbprint")
@@ -765,6 +773,8 @@ def validate_config(config: dict[str, Any]) -> list[str]:
             arn_error = ProfileValidator.validate_application_inference_profile_arn(arn)
             if arn_error:
                 errors.append(f"aws.{arn_key}: {arn_error}")
+    if not isinstance(aws.get("allow_openai_models", False), bool):
+        errors.append(f"aws.allow_openai_models: must be true or false (got '{aws.get('allow_openai_models')}')")
 
     monitoring = config.get("monitoring", {})
     if not isinstance(monitoring.get("enabled"), bool):
@@ -1062,6 +1072,8 @@ def _print_summary(console: Console, config: dict[str, Any], profile_name: str) 
     console.print(f"  Stack base name:  {config['aws']['identity_pool_name']}")
     console.print(f"  Model:            {config['aws'].get('selected_model')}")
     console.print(f"  Bedrock regions:  {', '.join(config['aws'].get('allowed_bedrock_regions') or [])}")
+    if config["aws"].get("allow_openai_models"):
+        console.print("  OpenAI models:    admitted on bedrock-runtime (ChatGPT Work / Codex); Mantle denied")
     monitoring = config["monitoring"]
     console.print(
         f"  Monitoring:       {'enabled (' + str(monitoring.get('mode')) + ')' if monitoring.get('enabled') else 'disabled'}"
@@ -1108,6 +1120,7 @@ def _print_summary(console: Console, config: dict[str, Any], profile_name: str) 
         web_search_enabled=config.get("web_search", {}).get("enabled", False),
         codebuild_region=codebuild_region,
         memory_enabled=config.get("memory", {}).get("enabled", False),
+        allow_openai_models=bool(config["aws"].get("allow_openai_models", False)),
     )
     if warnings:
         console.print("\n[yellow]\\[Data residency][/yellow]")

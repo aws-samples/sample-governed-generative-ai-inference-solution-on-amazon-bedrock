@@ -2,7 +2,7 @@ This sample is provided for illustration purposes. It represents a baseline impl
 
 # Governed generative AI inference solution on Amazon Bedrock
 
-A modular sample that deploys a shared set of identity, policy, and usage controls for supported generative AI clients that invoke models in Amazon Bedrock, using serverless and native AWS services. Supported clients fall into three groups: **internal products** where LLMs are embedded (any app using the AWS SDK), **desktop AI apps** such as Claude Cowork and Claude Desktop, and **CLI coding harnesses** such as Claude Code, OpenCode, Aider, and Pi (Codex CLI for the sample's MCP tools only).
+A modular sample that deploys a shared set of identity, policy, and usage controls for supported generative AI clients that invoke models in Amazon Bedrock, using serverless and native AWS services. Supported clients fall into three groups: **internal products** where LLMs are embedded (any app using the AWS SDK), **desktop AI apps** such as Claude Cowork and Claude Desktop, and **CLI coding harnesses** such as Claude Code, ChatGPT Work and Codex, OpenCode, Aider, and Pi.
 
 Governance controls such as SSO identity, optional per-user budgets in dollars or tokens, cost attribution, model governance, and telemetry are enforced **below the app layer** (IAM, STS, optional quota-gated credential issuance, and optional Bedrock invocation-log metering). Supported clients that use a configured integration path can use the controls you enable; [Harnesses Guide](assets/docs/HARNESSES.md) lists which clients the sample covers.
 
@@ -21,7 +21,7 @@ Configuration flows from the administrator profile in `~/.gip/profiles/<name>.js
 |---|---|---|---|
 | **Internal products** | Any application that calls Bedrock through the AWS SDK | Standard AWS `credential_process` provider in the SDK default chain — temporary credentials, optionally quota-gated, with no app-side auth code | [Internal products](#internal-products-any-aws-sdk-app), [How It Works](#how-it-works) |
 | **SuperApps** | Claude Desktop (Chat, Cowork, Code); pattern extends to other enterprise AI apps | Pinned AWS Samples [Claude apps gateway](#claude-apps-gateway-recommended-for-claude-apps) (recommended) or the credential-process architecture via static MDM | [CoWork 3P Guide](assets/docs/COWORK_3P.md) |
-| **CLI coding harnesses** | Claude Code, Codex CLI, OpenCode, Aider, Pi | Gateway (Claude apps) or the `credential_process` plug — zero harness-specific auth work | [Claude Code](#claude-code-cli), [Harnesses Guide](assets/docs/HARNESSES.md) |
+| **CLI coding harnesses** | Claude Code, ChatGPT Work and Codex (desktop app, CLI, IDE extension), OpenCode, Aider, Pi | Gateway (Claude apps) or the `credential_process` plug — zero harness-specific auth work | [Claude Code](#claude-code-cli), [Harnesses Guide](assets/docs/HARNESSES.md) |
 
 The sample is consumer-agnostic: each supported surface your organization connects uses the same deployed controls.
 
@@ -48,15 +48,15 @@ Two connection modes:
 - **Claude apps gateway (recommended):** Anthropic's first-party control plane — nothing to install on developer machines beyond Claude Code itself. Details in [the gateway section](#claude-apps-gateway-recommended-for-claude-apps).
 - **credential-process:** developers sign in with SSO; the binary vends temporary AWS credentials to the AWS SDK and quota-gates issuance when a quota endpoint is configured. Choose it when you need full per-user CloudTrail/CUR attribution or IAM Identity Center. Packaged and distributed via `gip package` / `gip distribute`.
 
-### Other CLI harnesses: OpenCode, Codex CLI, Pi, Aider
+### Other CLI harnesses: ChatGPT Work and Codex, OpenCode, Pi, Aider
 
-A harness that uses the AWS SDK default chain can use the same SSO login, quota enforcement, per-user cost attribution, and IAM model/region guardrails with no extra auth work. Codex CLI is the exception for inference: its Amazon Bedrock path uses the Mantle endpoint, which governed credentials deny by design ([Harnesses Guide](assets/docs/HARNESSES.md#openai-codex-cli)). Generate ready-to-use, verified configs with:
+A harness that uses the AWS SDK default chain can use the same SSO login, quota enforcement, per-user cost attribution, and IAM model/region guardrails with no extra auth work. ChatGPT Work and Codex run OpenAI models through the `amazon-bedrock-runtime` provider when the deployment sets `allow_openai_models: true`; their budgets need server-side metering in `max` mode, and their `amazon-bedrock` (Mantle) provider stays denied (for IAM Identity Center, if the permission set carries the deny) ([Harnesses Guide](assets/docs/HARNESSES.md#chatgpt-work-and-codex-desktop-app-cli-ide-extension), [ADR-0037](assets/docs/adr/0037-openai-models-on-bedrock-runtime.md)). Generate ready-to-use, verified configs with:
 
 ```bash
 poetry run gip package --harnesses all
 ```
 
-See the [Harnesses Guide](assets/docs/HARNESSES.md) for per-harness setup and an honest capability matrix (telemetry dashboards and the managed-settings default model and optional model restriction remain Claude-Code-only; per-user usage for other harnesses comes from CUR session-name attribution and optional [server-side metering](assets/docs/QUOTA_MONITORING.md#server-side-metering-tamper-proof-usage), which covers every harness identically). When [web search](assets/docs/WEB_SEARCH.md) is enabled, `gip package` also wires the gateway MCP endpoint into OpenCode and Codex CLI via a stdio proxy on the same binary (Pi and Aider have no MCP support upstream).
+See the [Harnesses Guide](assets/docs/HARNESSES.md) for per-harness setup and an honest capability matrix (telemetry dashboards and the managed-settings default model and optional model restriction remain Claude-Code-only; per-user usage for other harnesses comes from CUR session-name attribution and optional [server-side metering](assets/docs/QUOTA_MONITORING.md#server-side-metering-tamper-proof-usage), which covers every harness identically). When [web search](assets/docs/WEB_SEARCH.md) is enabled, `gip package` also wires the gateway MCP endpoint into OpenCode and Codex via a stdio proxy on the same binary (Pi and Aider have no MCP support upstream).
 
 ## Key Features
 
@@ -66,7 +66,7 @@ See the [Harnesses Guide](assets/docs/HARNESSES.md) for per-harness setup and an
 - **Budgets in Dollars or Tokens**: Per-user, per-group, and default policies with monthly/daily USD budgets (recommended) or raw token limits, 80/90/100% warning alerts, and alert-or-block enforcement
 - **Two Records of Truth**: Usage is measured from client telemetry and, optionally, [server-side from Bedrock model invocation logs](assets/docs/QUOTA_MONITORING.md#server-side-metering-tamper-proof-usage) — with automatic drift reconciliation so a stopped sidecar can't hide usage
 - **Server-Side Model Governance**: Default-on `RestrictToAnthropicModels` IAM scoping enforces the model allow-list below the client, not just in settings files
-- **Account-Level Guardrails** (optional): [Bedrock Guardrails enforcement](assets/docs/GUARDRAILS.md) applied to every model invocation in the account and region — server-side, not client-configurable
+- **Account-Level Guardrails** (optional): [Bedrock Guardrails enforcement](assets/docs/GUARDRAILS.md) applied to every in-scope model invocation in the account and region — server-side, not client-configurable (coverage of OpenAI Responses API calls is unverified; see the guide)
 - **Usage Monitoring**: CloudWatch dashboards with per-user cost attribution and [prompt-cache savings](assets/docs/MONITORING.md#measuring-prompt-cache-savings) (tokens saved and dollars saved by caching), plus S3 + Athena for historical analytics
 - **Model Lifecycle Alerts** (optional): Daily checks for legacy, provider-set premium pricing, and end-of-life model transitions (`gip deploy model-lifecycle`, `gip models check`)
 - **Data Residency**: Select your cross-region inference profile (US, EU, AU, JP, APAC, Global); the wizard warns when telemetry or web-search infrastructure would leave your inference geography
@@ -76,7 +76,7 @@ See the [Harnesses Guide](assets/docs/HARNESSES.md) for per-harness setup and an
 
 ### Consumer integrations
 
-- **Any Harness, One Plug**: The same credential-process powers [OpenCode, Codex CLI, Pi, and Aider](assets/docs/HARNESSES.md) — SSO, quotas, and attribution apply below the harness layer
+- **Any Harness, One Plug**: The same credential-process powers [ChatGPT Work and Codex, OpenCode, Pi, and Aider](assets/docs/HARNESSES.md) — SSO, quotas, and attribution apply below the harness layer
 - **Two Architectures**: The [Claude apps gateway](assets/docs/APPS_GATEWAY.md) central control plane (recommended for Claude Code and Claude Desktop) or per-developer STS federation (for other harnesses, IAM Identity Center, and per-user AWS-native audit) — deployable side by side
 - **Platform Tools over MCP** (optional): [Web search](assets/docs/WEB_SEARCH.md) grounded in Amazon's web index and log-only [memory](assets/docs/MEMORY.md) behind one [AgentCore Gateway endpoint](assets/docs/MCP_GATEWAY.md) — wired into Claude Code, Claude Desktop, OpenCode, and Codex CLI; group entitlement and identity-dependent memory activation are rejected pending redesign
 - **Skills Registry** (optional): Governed publish → approve → distribute lifecycle for [agent skills](assets/docs/SKILLS_REGISTRY.md) — immutable content-addressed artifacts, IAM-separated publisher/curator roles, delivered to Claude Code, OpenCode, Codex CLI, and AgentCore harnesses
@@ -103,7 +103,7 @@ See the [Harnesses Guide](assets/docs/HARNESSES.md) for per-harness setup and an
 
 The architecture is modular: start with the authentication core, then add monitoring, quota enforcement, analytics, governance, or distribution stacks independently as requirements grow. A small team can run auth-only; a large enterprise can enable every module — same platform. This guidance supports three authentication paths (see [Authentication Modes](#authentication-modes) for details). The recommended path is Direct IAM Federation:
 
-![Architecture diagram of the platform's deployable modules. On the left, a Developer machines box lists Claude Code, Claude Desktop and other AWS SDK clients: OpenCode, Pi, Aider, internal apps on any SDK host, and Codex CLI for MCP tools only. gip package installs credential-process and otel-helper on these machines. On the right, an AWS Cloud box holds an AWS account with a column of module cards, each saying how it is deployed. The Authentication core card, with a solid border, holds the IAM OIDC provider, the federated role and AWS STS. Optional modules follow with dashed borders: the Claude apps gateway, from the pinned upstream AWS Samples CDK; model governance with Amazon Bedrock Guardrails and a lifecycle check; quota and metering; telemetry and analytics; platform tools over MCP; the skills registry; and distribution. The platform tools card sits in its own us-east-1 Region box and holds Amazon Bedrock AgentCore Gateway and Amazon Bedrock AgentCore Memory in log-only mode, and notes that it calls the AWS-managed Web Search Tool. Dashed arrows link the developer machines with every card except model governance. A solid arrow shows every client except Codex CLI invoking Amazon Bedrock, at the top right, directly with temporary credentials. The gateway, model governance and quota cards connect to Amazon Bedrock with dashed arrows. A caption notes that other modules deploy to the Region chosen in gip init.](assets/images/platform-overview-v2.png)
+![Architecture diagram of the platform's deployable modules. On the left, a Developer machines box lists Claude Code, Claude Desktop and other AWS SDK clients: OpenCode, Pi, Aider, internal apps on any SDK host, and ChatGPT Work and Codex. gip package installs credential-process and otel-helper on these machines. On the right, an AWS Cloud box holds an AWS account with a column of module cards, each saying how it is deployed. The Authentication core card, with a solid border, holds the IAM OIDC provider, the federated role and AWS STS. Optional modules follow with dashed borders: the Claude apps gateway, from the pinned upstream AWS Samples CDK; model governance with Amazon Bedrock Guardrails and a lifecycle check; quota and metering; telemetry and analytics; platform tools over MCP; the skills registry; and distribution. The platform tools card sits in its own us-east-1 Region box and holds Amazon Bedrock AgentCore Gateway and Amazon Bedrock AgentCore Memory in log-only mode, and notes that it calls the AWS-managed Web Search Tool. Dashed arrows link the developer machines with every card except model governance. A solid arrow shows all clients invoking Amazon Bedrock, which serves Claude and OpenAI models, at the top right, directly with temporary credentials. The gateway, model governance and quota cards connect to Amazon Bedrock with dashed arrows. A caption notes that other modules deploy to the Region chosen in gip init.](assets/images/platform-overview-v2.png)
 
 ### Recommended: Direct IAM Federation
 
@@ -127,7 +127,7 @@ The architecture is modular: start with the authentication core, then add monito
 | **Monitoring** (optional) | Central mode: ECS Fargate OTEL collector + ALB. Sidecar mode: local collector on each machine. Both export to CloudWatch dashboards (incl. prompt-cache savings). | `gip deploy monitoring` |
 | **Quota enforcement** (optional) | Quota check API + DynamoDB policies + per-user/group USD budgets or token limits | `gip deploy quota` |
 | **Server-side metering** (optional) | Per-region Bedrock invocation-log metering (metadata only) + client/server drift reconciliation | `gip deploy metering` |
-| **Guardrails** (optional) | Account-level Bedrock Guardrails enforcement (harmful-content filters on every invocation in the region) + metadata-only dashboard | `gip deploy guardrails` |
+| **Guardrails** (optional) | Account-level Bedrock Guardrails enforcement (harmful-content filters on every in-scope invocation in the region; OpenAI Responses API calls unverified) + metadata-only dashboard | `gip deploy guardrails` |
 | **Model lifecycle** (optional) | Daily legacy/premium-pricing/end-of-life checks on the deployed model catalog, SNS alerts, AWS Health passthrough | `gip deploy model-lifecycle` |
 | **Analytics** (optional) | S3 data lake + Athena for historical SQL queries on usage data (incl. exact cache-savings queries) | `gip deploy analytics` |
 | **Web search** (optional) | AgentCore Gateway with the managed Web Search connector (MCP) — wired into Claude Code, Claude Desktop, OpenCode, and Codex CLI | `gip deploy websearch` |
@@ -168,7 +168,7 @@ For new deployments of Claude apps on Amazon Bedrock, Anthropic's [Claude apps g
 
 **💻 [Need a separate Claude Desktop configuration/MCP overlay? Add the Bootstrap companion](https://github.com/aws-samples/anthropic-on-aws/tree/main/claude-apps-gateway-bootstrap)** — it attaches to the same gateway and delivers its upstream PKCE configuration contract.
 
-Choose the credential-process architecture instead when you need per-user CloudTrail/CUR attribution, IAM Identity Center, or non-Claude consumers (internal AWS SDK apps, OpenCode, Pi, Aider; Codex CLI for MCP tools only). The two can coexist in one account. See the [Apps Gateway guide](assets/docs/APPS_GATEWAY.md) for a full decision table and deployment steps.
+Choose the credential-process architecture instead when you need per-user CloudTrail/CUR attribution, IAM Identity Center, or non-Claude consumers (internal AWS SDK apps, ChatGPT Work and Codex, OpenCode, Pi, Aider). The two can coexist in one account. See the [Apps Gateway guide](assets/docs/APPS_GATEWAY.md) for a full decision table and deployment steps.
 
 <details>
 <summary><strong>Areas where this platform complements Claude Apps Gateway today</strong></summary>
@@ -355,7 +355,7 @@ See [QUICK_START.md](QUICK_START.md#platform-builds) for build configuration.
 - [Architecture and Regional Deployability](assets/docs/ARCHITECTURE.md#regional-deployment-and-data-residency) - Account-local inference architecture, eight-region deployability, CRIS, and data-residency constraints
 - [Architecture Decision Records](assets/docs/adr/README.md) - Why the platform is built this way, with alternatives considered
 - [Claude Apps Gateway](assets/docs/APPS_GATEWAY.md) - Recommended server-side control plane for Claude apps, on ECS Fargate
-- [Harnesses Guide](assets/docs/HARNESSES.md) - OpenCode, Codex CLI, Pi, and Aider on the same governed endpoint
+- [Harnesses Guide](assets/docs/HARNESSES.md) - ChatGPT Work and Codex, OpenCode, Pi, and Aider on the same governed endpoint
 - [Deployment Guide](assets/docs/DEPLOYMENT.md) - Advanced deployment options
 - [Multi-Account Deployment](assets/docs/MULTI_ACCOUNT.md) - Account-local inference cells, SCPs, and what may centralize
 - [Network Isolation](assets/docs/NETWORK_ISOLATION.md) - PrivateLink coverage per component and the residual public surface

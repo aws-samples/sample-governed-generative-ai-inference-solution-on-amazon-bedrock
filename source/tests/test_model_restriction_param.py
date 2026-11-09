@@ -9,6 +9,7 @@ AnthropicModelsOnly condition, and an
 Anthropic-scoped resource list selected via !If.
 """
 
+import json
 from pathlib import Path
 
 import pytest
@@ -124,3 +125,80 @@ class TestRestrictToAnthropicModels:
         src = DEPLOY_PY.read_text(encoding="utf-8")
         assert "RestrictToAnthropicModels=" in src
         assert "restrict_to_anthropic_models" in src
+
+
+def _policy_statements(doc: dict) -> list:
+    for resource in doc.get("Resources", {}).values():
+        if resource.get("Type") == "AWS::IAM::ManagedPolicy":
+            return resource["Properties"]["PolicyDocument"]["Statement"]
+    raise AssertionError("no AWS::IAM::ManagedPolicy found")
+
+
+def _openai_statements(doc: dict) -> dict:
+    """Map Sid -> statement for the OpenAIModelsAllowed-gated statements."""
+    found = {}
+    for entry in _policy_statements(doc):
+        # CFLoader turns `!If [Cond, A, B]` into the plain list [Cond, A, B]
+        if isinstance(entry, list) and entry and entry[0] == "OpenAIModelsAllowed":
+            assert entry[2] == "AWS::NoValue", "OpenAI statements must vanish when the parameter is 'false'"
+            found[entry[1]["Sid"]] = entry[1]
+    return found
+
+
+class TestAllowOpenAIModels:
+    """ADR-0037: opt-in OpenAI admission on bedrock-runtime (ChatGPT Work / Codex)."""
+
+    @pytest.mark.parametrize("template_name", MODIFIED_TEMPLATES)
+    def test_parameter_defaults_to_false(self, template_name):
+        param = _load_template(template_name)["Parameters"]["AllowOpenAIModels"]
+        assert param["Type"] == "String"
+        assert param["Default"] == "false", "existing stacks must update with an unchanged policy"
+        assert sorted(param["AllowedValues"]) == ["false", "true"]
+
+    @pytest.mark.parametrize("template_name", MODIFIED_TEMPLATES)
+    def test_condition_is_positive_equals_true(self, template_name):
+        conditions = _load_template(template_name)["Conditions"]
+        assert conditions["OpenAIModelsAllowed"] == ["AllowOpenAIModels", "true"]
+
+    @pytest.mark.parametrize("template_name", MODIFIED_TEMPLATES)
+    def test_statements_are_exactly_the_live_verified_shape(self, template_name):
+        """Only bedrock:InvokeModel, on the four resources the 2026-10-02 probe required."""
+        statements = _openai_statements(_load_template(template_name))
+        assert set(statements) == {"AllowOpenAIInvokeRegional", "AllowOpenAIInvokeGlobal"}
+
+        regional = statements["AllowOpenAIInvokeRegional"]
+        assert regional["Effect"] == "Allow"
+        assert regional["Action"] == "bedrock:InvokeModel"
+        assert regional["Resource"] == [
+            "arn:${AWS::Partition}:bedrock:*::foundation-model/openai.*",
+            "arn:${AWS::Partition}:bedrock:*:*:inference-profile/*.openai.*",
+            "arn:${AWS::Partition}:bedrock:*:${AWS::AccountId}:project/default",
+        ]
+        assert regional["Condition"] == {"StringEquals": {"aws:RequestedRegion": "AllowedBedrockRegions"}}
+
+        global_stmt = statements["AllowOpenAIInvokeGlobal"]
+        assert global_stmt["Effect"] == "Allow"
+        assert global_stmt["Action"] == "bedrock:InvokeModel"
+        assert global_stmt["Resource"] == "arn:${AWS::Partition}:bedrock:::foundation-model/openai.*"
+        assert "Condition" not in global_stmt  # region-less ARN: aws:RequestedRegion still gates the regional ARNs
+
+    @pytest.mark.parametrize("template_name", MODIFIED_TEMPLATES)
+    def test_openai_statements_never_grant_mantle_or_wildcards(self, template_name):
+        for statement in _openai_statements(_load_template(template_name)).values():
+            assert not str(statement["Action"]).startswith("bedrock-mantle")
+            resources = statement["Resource"] if isinstance(statement["Resource"], list) else [statement["Resource"]]
+            for arn in resources:
+                assert "bedrock-mantle" not in arn
+                assert not arn.endswith("foundation-model/*") and not arn.endswith("inference-profile/*")
+
+    @pytest.mark.parametrize("template_name", MODIFIED_TEMPLATES)
+    def test_anthropic_statements_are_unchanged_by_the_new_parameter(self, template_name):
+        """The default-on Anthropic allow-list is not edited; OpenAI is purely additive."""
+        doc = _load_template(template_name)
+        for entry in _policy_statements(doc):
+            if isinstance(entry, dict) and entry.get("Sid", "").startswith("AllowBedrockInvoke"):
+                assert "openai" not in json.dumps(entry)
+
+    def test_deploy_passes_parameter_explicitly(self):
+        src = DEPLOY_PY.read_text(encoding="utf-8")
+        assert src.count("AllowOpenAIModels=") == src.count("RestrictToAnthropicModels=")

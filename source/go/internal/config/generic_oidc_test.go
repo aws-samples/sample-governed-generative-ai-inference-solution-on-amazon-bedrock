@@ -39,3 +39,23 @@ func TestGenericOIDCConfig(t *testing.T) {
 		t.Errorf("FederationType = %q, want \"direct\"", cfg.FederationType)
 	}
 }
+
+// oidc_scopes is optional; absent keeps the default (older bundles), present
+// is carried verbatim to the authorization request (OneLogin needs no
+// offline_access).
+func TestGenericOIDCScopesOptional(t *testing.T) {
+	cfg, err := LoadProfileFromPath("testdata/generic_oidc_cyberark.json", "gip")
+	if err != nil {
+		t.Fatalf("load failed: %v", err)
+	}
+	if cfg.OIDCScopes != "" {
+		t.Errorf("OIDCScopes = %q, want empty for a bundle without the field", cfg.OIDCScopes)
+	}
+	cfg, err = LoadProfileFromPath("testdata/generic_oidc_onelogin.json", "gip")
+	if err != nil {
+		t.Fatalf("load failed: %v", err)
+	}
+	if cfg.OIDCScopes != "openid profile email groups" {
+		t.Errorf("OIDCScopes = %q", cfg.OIDCScopes)
+	}
+}

@@ -217,6 +217,35 @@ class TestResolveOidcConfig:
         assert issuer == "https://login.microsoftonline.com/tenant-id/v2.0"
         assert not issuer.endswith("/")
 
+    def test_generic_uses_oidc_issuer_url_not_domain(self, command):
+        """Generic OIDC: the quota JWT authorizer issuer is the profile's oidc_issuer_url.
+
+        A generic IdP's issuer can carry a path (Cognito user pool, Keycloak realm,
+        OneLogin /oidc/2), so https://<domain> is not the token's iss claim. Live
+        deploy on 2026-11-08 failed with API Gateway "Invalid issuer" because the
+        authorizer got https://<domain>.
+        """
+        profile = Mock()
+        profile.sso_enabled = True
+        profile.provider_type = "generic"
+        profile.provider_domain = "idp.example.com"
+        profile.oidc_issuer_url = "https://idp.example.com/realms/corp"
+        profile.client_id = "genericclient"
+        issuer, client_id = command._resolve_oidc_config(profile)
+        assert issuer == "https://idp.example.com/realms/corp"
+        assert client_id == "genericclient"
+
+    def test_generic_without_issuer_url_falls_back_to_domain(self, command):
+        """A generic profile without oidc_issuer_url keeps the https://<domain> issuer."""
+        profile = Mock()
+        profile.sso_enabled = True
+        profile.provider_type = "generic"
+        profile.provider_domain = "auth.example.com"
+        profile.oidc_issuer_url = None
+        profile.client_id = "genericclient"
+        issuer, _ = command._resolve_oidc_config(profile)
+        assert issuer == "https://auth.example.com"
+
 
 class TestQuotaSkippedWhenSsoDisabled:
     """Regression tests for issue #454.
@@ -343,3 +372,56 @@ class TestInitQuotaSkippedWhenSsoDisabled:
             config["quota"]["enabled"] = False
 
         assert config["quota"]["enabled"] is True
+
+
+class TestQuotaShowCommandsMatchesDeploy:
+    """`gip deploy quota --show-commands` prints the issuer and metering mode the real deploy uses."""
+
+    @staticmethod
+    def _profile(**overrides):
+        data = {
+            "name": "test",
+            "provider_domain": "cognito-idp.eu-central-1.amazonaws.com",
+            "client_id": "client123",
+            "credential_storage": "session",
+            "aws_region": "eu-central-1",
+            "identity_pool_name": "gip-test",
+            "provider_type": "generic",
+            "oidc_issuer_url": "https://cognito-idp.eu-central-1.amazonaws.com/eu-central-1_EXAMPLE",
+            "allowed_bedrock_regions": ["eu-central-1"],
+            "monitoring_enabled": True,
+            "quota_monitoring_enabled": True,
+            "metering_enabled": True,
+            "metering_mode": "max",
+        }
+        data.update(overrides)
+        return Profile.from_dict(data)
+
+    @staticmethod
+    def _run(profile, capsys):
+        with (
+            patch("governed_inference_platform.cli.commands.deploy.Config") as MockConfig,
+            patch("governed_inference_platform.cli.commands.deploy.CloudFormationManager") as MockCFM,
+        ):
+            MockConfig.load.return_value.get_profile.return_value = profile
+            MockConfig.load.return_value.active_profile = "test"
+            MockCFM.return_value.get_stack_status.return_value = None
+            tester = CommandTester(DeployCommand())
+            rc = tester.execute("quota --show-commands")
+        out = tester.io.fetch_output() + capsys.readouterr().out
+        return rc, " ".join(out.replace("\\", " ").split())
+
+    def test_generic_issuer_with_path_and_metering_mode(self, capsys):
+        rc, out = self._run(self._profile(), capsys)
+        assert rc == 0
+        assert "OidcIssuerUrl=https://cognito-idp.eu-central-1.amazonaws.com/eu-central-1_EXAMPLE" in out
+        assert "MeteringMode=max" in out
+
+    def test_okta_issuer_matches_real_deploy(self, capsys):
+        profile = self._profile(
+            provider_type="okta", provider_domain="company.okta.com", oidc_issuer_url=None, metering_enabled=False
+        )
+        rc, out = self._run(profile, capsys)
+        assert rc == 0
+        assert "OidcIssuerUrl=https://company.okta.com/oauth2/default" in out
+        assert "MeteringMode=shadow" in out

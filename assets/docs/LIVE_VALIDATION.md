@@ -50,6 +50,7 @@ exercise), [QUOTA_MONITORING.md](QUOTA_MONITORING.md),
 | [LV-15](#lv-15-generated-harness-configs-against-live-clis) | Generated harness configs against live CLIs | Shipped OpenCode/Codex/Claude Code MCP wiring fails on first customer use | **verified with model caveats** | 2026-08-14 |
 | [LV-16](#lv-16-web-search-and-memory-outside-us-east-1) | Web Search / Memory deployment outside us-east-1 | Regional availability docs are stale in either direction | **verified, web search rejected in us-west-2** | 2026-08-14 |
 | [LV-17](#lv-17-validation-fixture-sweep) | Validation-fixture sweep (terminal) | Orphaned fixtures keep billing and pollute the account | **blocked by EC2 Mac 24-hour floor** | 2026-08-15 |
+| [LV-18](#lv-18-chatgpt-work-and-codex-on-bedrock-runtime) | ChatGPT Work / Codex on bedrock-runtime: governed inference, Mantle deny, metering, budget block | The ChatGPT Work path is unmetered, unblockable, or simply broken | **verified (Codex CLI 0.160.0 and 0.167.0, eu-central-1); desktop app not tested** | 2026-11-08 |
 
 When an item passes, update its Status to `verified`, fill Last verified, and
 make the doc edits listed in that item's **On pass** row.
@@ -839,7 +840,7 @@ shell of it exists (a rule failure normally leaves nothing).
 |---|---|
 | **Claim** | Generated harness configs work against live clients. On 2026-08-14, OpenCode 1.18.18 returned `4` and connected the web-search MCP proxy; Aider 0.86.2 and Pi 0.73.1 worked with Sonnet 4.5; Codex 0.147.0 used governed identity and received the expected Mantle deny. Sonnet 5 payloads were incompatible with Aider/Pi, so generation uses the selected model. |
 | **Applies to** | OIDC (the MCP half needs the gateway; the inference half works in any mode). |
-| **Preconditions** | Auth stack deployed; `gip package --harnesses all`; installer run on the test machine (it resolves the `__CREDENTIAL_PROCESS_PATH__` placeholder); OpenCode, Codex CLI, and Claude Code installed. Web search stack for the MCP half. Codex only: the default `RestrictToAnthropicModels=true` blocks the OpenAI models Codex requires — expect the documented failure, or redeploy auth with it `false` for the test. |
+| **Preconditions** | Auth stack deployed; `gip package --harnesses all`; installer run on the test machine (it resolves the `__CREDENTIAL_PROCESS_PATH__` placeholder); OpenCode, Codex CLI, and Claude Code installed. Web search stack for the MCP half. Codex only: since 2026-10-02 the generated config uses the `amazon-bedrock-runtime` provider and needs `AllowOpenAIModels=true`; without it expect AccessDenied on OpenAI models (see [LV-18](#lv-18-chatgpt-work-and-codex-on-bedrock-runtime)). |
 | **Cost** | One inference call per harness (cents). |
 
 ### Procedure
@@ -855,10 +856,10 @@ Per harness:
    lists tools (the shim is
    `credential-process --mcp-proxy <gateway-url>`).
 3. **Codex CLI:** apply `harnesses/codex/config.toml`; with
-   `RestrictToAnthropicModels=true` expect the documented AccessDenied on
-   OpenAI models (that IS the pass for the guardrail); with it `false`, one
-   prompt must succeed; confirm the `[mcp_servers.agentcore-websearch]`
-   entry lists tools.
+   `AllowOpenAIModels=false` expect AccessDenied on OpenAI models (that IS
+   the pass for the guardrail); with it `true`, one prompt must succeed
+   (LV-18); confirm the `[mcp_servers.agentcore-websearch]` entry lists
+   tools.
 4. **Pi / Aider:** inference-only smoke (`AWS_PROFILE=<profile>` + the
    documented flags); no MCP wiring exists by design.
 
@@ -923,6 +924,89 @@ touching the gateway).
 
 **On pass:** update WEB_SEARCH.md (and MEMORY.md's region statements if
 memory was tested) with region + date.
+
+---
+
+## LV-18: ChatGPT Work and Codex on bedrock-runtime
+
+| | |
+|---|---|
+| **Claim** | With `AllowOpenAIModels=true` and metering mode `max`, ChatGPT Work and Codex (`amazon-bedrock-runtime` provider) run on governed credentials, the Mantle provider stays denied, usage is metered per user from invocation logs, and an exhausted budget refuses credential issuance ([ADR-0037](adr/0037-openai-models-on-bedrock-runtime.md)). |
+| **Applies to** | OIDC (direct federation, `SessionNameBinding=email`). IDC users run on the permission set's statements, not the auth stack's role ([setup guide](providers/iam-identity-center-setup.md#chatgpt-work-and-codex-openai-models)); not run. |
+| **Preconditions** | Auth, quota (`enable_finegrained_quotas: true`) and metering (`max`) stacks; `gip package --harnesses codex` (plus `opencode` for the open-weight step of the 2026-11-08 run); OpenAI model access in the account; Codex CLI with the `amazon-bedrock-runtime` provider (0.160.0 and 0.167.0 used). Run with a disposable `CODEX_HOME` and AWS config file. |
+| **Cost** | 2026-10-02: five short calls on GPT-6 Sol Global (about $0.10 in total). 2026-11-08: six invocations, metered at $0.063 (fallback rates for GPT-OSS and the open-weight model). |
+
+**2026-10-02 result (sandbox account, `eu-central-1`, Cognito user pool as a
+generic OIDC IdP):**
+
+1. The generated `config.toml` returned `bedrock-ok` on `global.openai.gpt-6-sol`
+   with the credential-process profile; the invocation log identity was the
+   test user's email session name.
+2. Mantle provider (`amazon-bedrock`) in `us-east-1` and `eu-central-1`: 403
+   explicit deny on `bedrock-mantle:CreateInference`. A US Geo profile from a
+   Region outside `AllowedBedrockRegions` and non-allowed models (Amazon Nova)
+   were denied.
+3. Each call wrote a `Responses` record with `inputTokenCount`,
+   `cacheReadInputTokenCount`, `cacheWriteInputTokenCount`, `outputTokenCount`
+   and `inferenceRegion: us-east-1`; a resumed session showed a cache read.
+   The processor accrued `server_*` tokens and USD at GPT-6 Sol Global rates.
+4. At a $0.03 user limit (`--enforcement block`) and $0.041 metered spend, the
+   credential-process printed `ACCESS BLOCKED - QUOTA EXCEEDED`, issued nothing
+   on both the cached re-check and a fresh login, and Codex failed to load AWS
+   credentials. In `shadow` mode the same user received credentials (negative
+   control). Raising the limit unblocked the user.
+
+Deviations and findings: Cognito user pools reject the generic provider's
+`offline_access` scope, so the headless browser shim removed it; OneLogin also
+rejects `offline_access` on the authorization-code flow
+(<https://developers.onelogin.com/openid-connect/api/authorization-code>, read
+2026-10-02). The metering processor failed every accrual before the plain-DynamoDB-client fix (regression test `TestTransactWireFormat`).
+The ChatGPT desktop app, IDE extension and web-search MCP proxy were not tested.
+
+**2026-11-08 re-run (sandbox account, `eu-central-1`, Cognito user pool as a
+generic OIDC IdP with `oidc_scopes: "openid profile email"`, Codex CLI 0.167.0,
+OpenCode 2.2.5):**
+
+1. The generated `config.toml`, unmodified, returned `bedrock-ok` on
+   `global.openai.gpt-6-sol` (7,988 tokens). The STS identity and the
+   invocation log identity were
+   `assumed-role/BedrockOidcFederatedRole/<test-user>@example.com`. The
+   browser sign-in used the configured scopes, so no scope was removed.
+2. Mantle provider in `eu-central-1` and `us-east-1`: 403 explicit deny on
+   `bedrock-mantle:CreateInference`. `us.openai.gpt-6-sol` from `us-east-1`
+   (outside `AllowedBedrockRegions`): 401, no identity-based policy allows
+   `bedrock:InvokeModel`. `qwen.qwen3-coder-30b-a3b-v1:0` with
+   `RestrictToAnthropicModels=true`: `AccessDeniedException`.
+3. With the same profile, `converse` on
+   `global.anthropic.claude-haiku-4-5-20251001-v1:0` succeeded, and so did
+   `openai.gpt-oss-120b-1:0` (on-demand), because `AllowOpenAIModels=true`
+   admits every `openai.*` model. Metering priced GPT-OSS at the
+   `openai-unpriced` fallback (GPT-6 Astra US Geo, $11/$55 per 1M input/output)
+   and logged an `unpriced_openai_model` WARNING.
+4. The processor logged no `ValidationException`, and the DLQ stayed empty.
+   The user's `server_estimated_cost` ($0.023801 after three calls) equals the
+   cost recomputed from `shared/pricing.py` for the three logged records.
+5. At a $0.01 limit (`--enforcement block`) and $0.0238 metered spend (shown
+   as $0.02, 238%), the credential-process exited 1, printed
+   `ACCESS BLOCKED - QUOTA EXCEEDED` and wrote no credentials, on the cached
+   re-check and after a fresh browser sign-in, and Codex failed to load AWS
+   credentials. At $1.00 Codex returned `bedrock-ok` again.
+6. After `restrict_to_anthropic_models: false` and `gip deploy auth`, OpenCode
+   (`opencode run --standalone`, generated `opencode.json` with only the model
+   ID changed) returned `bedrock-ok` on `qwen.qwen3-coder-30b-a3b-v1:0`. Two
+   `ConverseStream` records carried the user identity. Metering priced them at
+   the default Sonnet rates ($3/$15 per 1M), with no warning, because no
+   open-weight family is configured.
+
+Findings: `gip deploy quota` failed for this generic issuer (the authorizer
+used `https://<domain>`) until the fix that uses `oidc_issuer_url`. The quota
+stack then deployed, and the checks above ran on the fixed code.
+
+**PASS:** governed inference, the Mantle, Region and model denials, attributed
+and priced metering, and the budget block all hold (steps 1-4 of the 2026-10-02
+run, steps 1-5 of the 2026-11-08 run). **FAIL:** any governed OpenAI call is denied, Mantle
+is reachable, a record is unattributed or unpriced, or an over-budget user
+receives credentials.
 
 ---
 

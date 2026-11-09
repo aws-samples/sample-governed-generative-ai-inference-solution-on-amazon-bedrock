@@ -94,28 +94,107 @@ class TestOpenCodeGenerator:
 
 
 class TestCodexGenerator:
-    def test_output_is_valid_toml(self):
+    """ChatGPT Work / Codex on Bedrock Runtime (ADR-0037).
+
+    Format source: https://learn.chatgpt.com/docs/amazon-bedrock (retrieved 2026-10-02).
+    """
+
+    def test_output_is_valid_toml_on_the_runtime_provider(self):
         cfg = generate_codex_config(PROFILE, REGION, MODEL_IDS)
         parsed = tomllib.loads(cfg.content)
         assert cfg.filename == "config.toml"
-        assert parsed["model_provider"] == "amazon-bedrock"
+        assert parsed["model_provider"] == "amazon-bedrock-runtime"
 
-    def test_contains_profile_and_region(self):
-        content = generate_codex_config(PROFILE, REGION, MODEL_IDS).content
-        assert f"AWS_PROFILE={PROFILE}" in content
-        assert f"AWS_REGION={REGION}" in content
+    def test_never_selects_the_mantle_provider(self):
+        """Regression: the old generator emitted model_provider = "amazon-bedrock" (Mantle, IAM-denied)."""
+        parsed = tomllib.loads(generate_codex_config(PROFILE, REGION, MODEL_IDS).content)
+        assert parsed["model_provider"] != "amazon-bedrock"
+        assert "amazon-bedrock" not in parsed.get("model_providers", {})
+
+    def test_hosted_web_search_disabled(self):
+        parsed = tomllib.loads(generate_codex_config(PROFILE, REGION, MODEL_IDS).content)
+        assert parsed["web_search"] == "disabled"
+
+    def test_provider_aws_table_pins_profile_and_region(self):
+        parsed = tomllib.loads(generate_codex_config(PROFILE, "eu-central-1", MODEL_IDS).content)
+        assert parsed["model_providers"]["amazon-bedrock-runtime"]["aws"] == {
+            "profile": PROFILE,
+            "region": "eu-central-1",
+        }
+
+    @pytest.mark.parametrize(
+        ("region", "model"),
+        [
+            ("us-east-1", "us.openai.gpt-6-sol"),
+            ("us-west-2", "us.openai.gpt-6-sol"),
+            ("eu-central-1", "global.openai.gpt-6-sol"),
+            ("eu-west-1", "global.openai.gpt-6-sol"),
+            ("ap-northeast-1", "global.openai.gpt-6-sol"),
+        ],
+    )
+    def test_default_model_is_a_cris_profile_valid_for_the_source_region(self, region, model):
+        parsed = tomllib.loads(generate_codex_config(PROFILE, region, MODEL_IDS).content)
+        assert parsed["model"] == model
+
+    def test_global_default_carries_data_residency_warning(self):
+        cfg = generate_codex_config(PROFILE, "eu-central-1", MODEL_IDS)
+        assert "DATA RESIDENCY" in cfg.content
+        assert "Global cross-Region inference" in cfg.setup_instructions
+
+    def test_us_default_has_no_global_routing_warning(self):
+        cfg = generate_codex_config(PROFILE, "us-east-1", MODEL_IDS)
+        assert "DATA RESIDENCY" not in cfg.content
+
+    def test_govcloud_leaves_model_unset(self):
+        parsed = tomllib.loads(generate_codex_config(PROFILE, "us-gov-west-1", MODEL_IDS).content)
+        assert "model" not in parsed
 
     def test_uses_openai_model_not_claude_cris(self):
-        # Honest limitation: Codex's Bedrock path runs OpenAI models only —
-        # Claude CRIS IDs must NOT appear as the configured model.
         parsed = tomllib.loads(generate_codex_config(PROFILE, REGION, MODEL_IDS).content)
-        assert parsed["model"].startswith("openai.")
+        assert ".openai." in parsed["model"]
         for model_id in MODEL_IDS.values():
             assert parsed.get("model") != model_id
 
-    def test_instructions_cite_source_url(self):
+    def test_desktop_env_file_carries_profile_and_region(self):
+        cfg = generate_codex_config(PROFILE, "eu-central-1", MODEL_IDS)
+        files = dict(cfg.extra_files)
+        assert set(files) == {"codex.env", "requirements.toml"}
+        lines = [line for line in files["codex.env"].splitlines() if line and not line.startswith("#")]
+        assert lines == [f"AWS_PROFILE={PROFILE}", "AWS_REGION=eu-central-1"]
+        assert "AWS_BEARER_TOKEN_BEDROCK" not in "\n".join(lines)
+
+    def test_admin_requirements_enforce_runtime_provider_api_login_and_no_web_search(self):
+        """Schema: learn.chatgpt.com/docs/enterprise/managed-configuration (retrieved 2026-10-02)."""
+        files = dict(generate_codex_config(PROFILE, "eu-central-1", MODEL_IDS).extra_files)
+        req = tomllib.loads(files["requirements.toml"])
+        assert req == {
+            "model_provider": "amazon-bedrock-runtime",
+            "allowed_login_methods": ["api"],
+            "allowed_web_search_modes": [],
+            "features": {"in_app_updates": False},
+        }
+
+    def test_admin_requirements_are_profile_independent(self):
+        """One fleet-wide file: no per-user profile name or Region baked in."""
+        a = dict(generate_codex_config("gip-a", "eu-central-1", MODEL_IDS).extra_files)["requirements.toml"]
+        b = dict(generate_codex_config("gip-b", "us-east-1", MODEL_IDS).extra_files)["requirements.toml"]
+        assert a == b
+        assert "gip-a" not in a
+
+    def test_admin_requirements_never_pin_mantle(self):
+        files = dict(generate_codex_config(PROFILE, REGION, MODEL_IDS).extra_files)
+        assert tomllib.loads(files["requirements.toml"])["model_provider"] != "amazon-bedrock"
+
+    def test_instructions_point_admins_at_requirements_locations(self):
         cfg = generate_codex_config(PROFILE, REGION, MODEL_IDS)
-        assert "https://developers.openai.com/codex/amazon-bedrock" in cfg.setup_instructions
+        assert "/etc/codex/requirements.toml" in cfg.setup_instructions
+        assert "requirements_toml_base64" in cfg.setup_instructions
+
+    def test_instructions_cite_source_url_and_governance_prerequisites(self):
+        cfg = generate_codex_config(PROFILE, REGION, MODEL_IDS)
+        assert "https://learn.chatgpt.com/docs/amazon-bedrock" in cfg.setup_instructions
+        assert "allow_openai_models: true" in cfg.setup_instructions
+        assert "metering.mode: max" in cfg.setup_instructions
 
     def test_no_mcp_servers_without_mcp_proxy(self):
         parsed = tomllib.loads(generate_codex_config(PROFILE, REGION, MODEL_IDS).content)
@@ -129,6 +208,7 @@ class TestCodexGenerator:
             "command": CREDENTIAL_PROCESS_PLACEHOLDER,
             "args": ["--profile", PROFILE, "--mcp-proxy", GATEWAY_URL],
         }
+        assert parsed["model_provider"] == "amazon-bedrock-runtime"
 
     def test_mcp_proxy_never_uses_static_bearer_options(self):
         """R10: bearer_token_env_var / http_headers are static and die at token expiry."""

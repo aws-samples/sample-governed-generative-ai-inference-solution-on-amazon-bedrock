@@ -62,6 +62,10 @@ type ProfileConfig struct {
 	OIDCTokenEndpoint         string `json:"oidc_token_endpoint,omitempty"`
 	OIDCJwksURI               string `json:"oidc_jwks_uri,omitempty"`
 	OIDCThumbprint            string `json:"oidc_thumbprint,omitempty"`
+	// Space-separated OAuth scopes for the generic provider. Empty keeps the
+	// default "openid profile email offline_access". OneLogin needs
+	// offline_access removed (it rejects it on the authorization-code flow).
+	OIDCScopes string `json:"oidc_scopes,omitempty"`
 
 	// Custom OAuth callback port (default 8400). REDIRECT_PORT env var takes precedence.
 	RedirectPort int `json:"redirect_port,omitempty"`

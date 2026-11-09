@@ -84,7 +84,7 @@ flowchart TB
 
 The two usage records are deliberately independent: client telemetry comes through the OTEL path, while server totals come from Bedrock Runtime invocation logs. Service-generated token counts are tamper-resistant, but their **Direct STS per-user attribution is trustworthy only with `SessionNameBinding=email|sub`**. With `SessionNameBinding=none`, the session name and resulting per-user server bucket remain client-asserted.
 
-`shadow` observes drift without changing enforcement; `max` evaluates the higher client or server figure. Neither mode repairs untrusted identity labels or processor records that fail to accrue. There is no `strict` mode. `bedrock-mantle` is denied to governed credentials because it does not produce the invocation logs required by this flow.
+`shadow` observes drift without changing enforcement; `max` evaluates the higher client or server figure. Neither mode repairs untrusted identity labels or processor records that fail to accrue. There is no `strict` mode. `bedrock-mantle` is denied to governed credentials (for IAM Identity Center, when the permission set carries the deny) because it does not produce the invocation logs required by this flow.
 
 This decision applies to the **credential-process/direct IAM path** at credential issuance and periodic re-check, not inline to every Bedrock request. Claude Apps Gateway applies its own inline spend controls; gateway and direct-path budgets are separate and are not a unified hard cap.
 
@@ -132,6 +132,15 @@ gip quota set-user user@company.com
 | Opus | $5.00 | $25.00 | $0.50 | $6.25 |
 | Sonnet | $3.00 | $15.00 | $0.30 | $3.75 |
 | Haiku | $1.00 | $5.00 | $0.10 | $1.25 |
+| GPT-6 Sol (Global / US Geo) | $2.00 / $2.20 | $10.00 / $11.00 | $0.20 / $0.22 | $2.50 / $2.75 |
+| GPT-6.1 Sol (Global / US Geo) | $2.00 / $2.20 | $10.00 / $11.00 | $0.10 / $0.11 | $2.50 / $2.75 |
+| GPT-6 Luna (Global / US Geo) | $0.10 / $0.11 | $0.50 / $0.55 | $0.01 / $0.011 | $0.125 / $0.1375 |
+| GPT-6 Astra (Global / US Geo) | $10.00 / $11.00 | $50.00 / $55.00 | $1.00 / $1.10 | $12.50 / $13.75 |
+
+OpenAI rows are the short-context (272K input tokens or fewer) Standard-tier
+rates from the Amazon Bedrock model cards, retrieved 2026-10-02; GPT-5.6
+Sol/Terra/Luna and the long-context rates are in `shared/pricing.py` with their
+source URLs.
 
 Rates are overridable via `BEDROCK_PRICING_RATES_JSON` Lambda env var.
 
@@ -1037,7 +1046,7 @@ fails as in the "setting turned off after adopting" row.
 | Mode | Behavior |
 | --- | --- |
 | `shadow` (default) | Collect `server_*` figures and reconcile against client telemetry. **Enforcement is unchanged** - run this for at least 2 weeks to validate identity mapping before tightening. Cache-token fidelity was live-verified on 2026-08-14. |
-| `max` | `quota_check` enforces on `max(client, server)` for monthly/daily tokens and cost. A stopped sidecar no longer reduces enforced usage; client figures still cover server-side collection gaps. Switch by setting `metering_mode: "max"` and redeploying the quota + metering stacks. |
+| `max` | `quota_check` enforces on `max(client, server)` for monthly/daily tokens and cost. A stopped sidecar no longer reduces enforced usage; client figures still cover server-side collection gaps. Switch by setting `metering_mode: "max"` and redeploying the quota + metering stacks. **Required for ChatGPT Work and Codex users**: they emit no Claude Code OTEL metrics, so `shadow` enforces on a client figure of zero (live-verified 2026-10-02: the same over-budget user received credentials in `shadow` and was refused in `max`). |
 | `strict` | **Not implemented** (Phase 3). Prerequisites: cache-token fidelity resolved, session-name binding hardened, coverage alarms quiet for a full billing cycle. |
 
 ### Drift Alerts (Reconciliation)
@@ -1082,6 +1091,54 @@ cache write (7,613 tokens), cache read (7,613 tokens), input, and output.
   it those modes must not be described as tamper-resistant **per-user**
   enforcement. Binding remains a prerequisite for any future strict mode.
 
+### ChatGPT Work and Codex (OpenAI models on bedrock-runtime)
+
+With `AllowOpenAIModels=true` ([ADR-0037](adr/0037-openai-models-on-bedrock-runtime.md)),
+ChatGPT Work and Codex call the bedrock-runtime Responses API. Each call writes
+a metadata-only invocation log record with `operation: Responses`, the CRIS
+profile ARN as `modelId`, the caller's assumed-role ARN, and
+`inputTokenCount`, `cacheReadInputTokenCount`, `cacheWriteInputTokenCount` and
+`outputTokenCount` (live-verified 2026-10-02 in `eu-central-1`, including a
+cache read on a resumed session). The processor prices them with the OpenAI
+families in `shared/pricing.py`: Global (`global.`) and US Geo (`us.`) rates
+from the model cards, long-context rates above 272K input-side tokens, and the
+GPT-6 Astra US Geo rate (the highest Standard-tier rate in `shared/pricing.py`)
+with a WARNING for OpenAI IDs without a configured rate. Rates are Standard tier
+only: requests on a premium tier such as Ultrafast are under-metered (see the
+model cards), and other Geo prefixes such as `in.` or `us-gov.` are metered at
+the US Geo rate with a WARNING. That is below the GovCloud card rates (for
+example GPT-5.6 Terra: $2.70 input and $16.20 output per 1M tokens in GovCloud,
+$2.20 and $13.20 on US Geo), so `us-gov.` usage is under-metered. There is no
+separate GovCloud pricing family: the GPT-5.6 Terra and Luna `us-gov.` IDs
+resolve to the `openai-gpt-5-6-<model>-us` and `-us-long` families, so a
+GovCloud deployment overrides those keys with the GovCloud card rates through
+`BEDROCK_PRICING_RATES_JSON`, giving all four rates (`input`, `output`,
+`cache_read`, `cache_write`): a partial entry keeps the US Geo values for the
+rest. The variable is not a stack parameter; set it on the metering processor
+Lambda function.
+
+For budgets that block ChatGPT Work users:
+
+- `metering.mode: max` (see the table above). The live run used a $0.03
+  per-user limit: at $0.041 metered spend (136.8%) the credential-process
+  refused issuance on both the cached-credential re-check and a fresh login, and
+  raising the limit unblocked the user.
+- `enable_finegrained_quotas: true` for per-user and per-group policies, and
+  `--enforcement block` on `gip quota set-user` / `set-group` (the CLI default
+  is `alert`).
+- `SessionNameBinding=email|sub` so the per-user label is IdP-signed.
+
+Expected side effect: client telemetry for a ChatGPT-Work-only user is zero, so
+once the user passes `DRIFT_MIN_SERVER_TOKENS` (default 1M tokens) in a month,
+reconciliation raises one `metering_drift` alert for that user that month.
+
+Enforcement still happens at credential issuance ([ADR-0009](adr/0009-enforcement-at-credential-issuance.md)).
+In the live run Codex CLI invoked `credential_process` at every process start,
+so the 30-minute cached re-check applies, but a session that is already
+running keeps its STS credentials until they expire (`max_session_duration`,
+12 hours by default for direct federation). Size the per-user limit and
+`max_session_duration` for that overshoot.
+
 ### Endpoint Scope: bedrock-runtime Only (Mantle Tripwire)
 
 Server-side metering covers the `bedrock-runtime` endpoint only. The
@@ -1092,13 +1149,16 @@ its inference calls are CloudTrail *data* events — invisible to the sidecar
 bypass detection above. Per-user Mantle metering is therefore **deferred**
 (see [ADR-0022](adr/0022-mantle-metering-deferred-tripwire.md)); governed
 credentials carry an explicit `DenyBedrockMantleEndpoint` IAM statement
-instead (fail-closed until metering parity exists).
+instead (fail-closed until metering parity exists). IAM Identity Center users
+get the deny only from their permission set
+([setup guide](providers/iam-identity-center-setup.md#chatgpt-work-and-codex-openai-models)).
 
 As a fail-visible backstop, each metering stack includes a
 `MantleEndpointUsageAlarm`: a Metrics Insights alarm on
 `SELECT SUM(Inferences) FROM "AWS/BedrockMantle"` that fires on **any** Mantle
 inference in that account/region — since governed credentials are denied and
-metering cannot see Mantle, any datapoint means ungoverned use. It notifies
+metering cannot see Mantle, any datapoint means unmetered use, from ungoverned
+credentials or from a permission set without the deny. It notifies
 the stack's `AlarmTopicArn` when set (otherwise console/dashboard-visible
 only). If it fires: CUR mantle usage types (`*-mantle-*-tokens-*`) confirm
 ungoverned Mantle spend at account granularity; to identify the caller, enable
