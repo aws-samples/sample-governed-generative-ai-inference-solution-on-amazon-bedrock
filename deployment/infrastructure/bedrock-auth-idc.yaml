@@ -15,6 +15,7 @@ Metadata:
         Parameters:
           - AllowedBedrockRegions
           - RestrictToAnthropicModels
+          - AllowOpenAIModels
       - Label:
           default: "Monitoring"
         Parameters:
@@ -31,6 +32,8 @@ Metadata:
         default: "Allowed Amazon Bedrock regions"
       RestrictToAnthropicModels:
         default: "Restrict to Anthropic models only"
+      AllowOpenAIModels:
+        default: "Admit OpenAI models on bedrock-runtime (ChatGPT Work and Codex)"
       EnableMonitoring:
         default: "Enable monitoring and logging"
       MonitoringMode:
@@ -72,6 +75,19 @@ Parameters:
       set 'false' only for explicitly approved non-Anthropic or opaque
       application-inference-profile deployments.
 
+  AllowOpenAIModels:
+    Type: String
+    Default: 'false'
+    AllowedValues:
+      - 'true'
+      - 'false'
+    Description: >-
+      When 'true', also admits OpenAI models on the bedrock-runtime endpoint
+      (ChatGPT Work and Codex `amazon-bedrock-runtime` provider, ADR-0037):
+      bedrock:InvokeModel on openai.* foundation models, *.openai.* cross-Region
+      inference profiles and the account's default project. Default 'false'
+      leaves the policy unchanged. The bedrock-mantle deny is unaffected.
+
   EnableMonitoring:
     Type: String
     Default: 'true'
@@ -94,6 +110,7 @@ Conditions:
     - !Condition MonitoringEnabled
     - !Equals [!Ref MonitoringMode, 'sidecar']
   AnthropicModelsOnly: !Equals [!Ref RestrictToAnthropicModels, 'true']
+  OpenAIModelsAllowed: !Equals [!Ref AllowOpenAIModels, 'true']
 
 Resources:
   # Customer-managed IAM policy for Bedrock access
@@ -131,6 +148,35 @@ Resources:
             Condition:
               StringEquals:
                 'aws:RequestedRegion': !Ref AllowedBedrockRegions
+          # ADR-0037: OpenAI models on the bedrock-runtime endpoint (ChatGPT Work
+          # and Codex `amazon-bedrock-runtime` provider). Verified live on
+          # 2026-10-02: a Responses API call (streaming included) authorizes
+          # bedrock:InvokeModel on the CRIS inference profile, the source-Region
+          # foundation model, the account's default project and, for global.*
+          # profiles, the region-less foundation model. Mantle stays denied by
+          # DenyBedrockMantleEndpoint above. IDC credential-process uses the permission
+          # set's credentials and does not assume BedrockIDCRole, so the permission set
+          # needs these statements itself (providers/iam-identity-center-setup.md).
+          - !If
+            - OpenAIModelsAllowed
+            - Sid: AllowOpenAIInvokeRegional
+              Effect: Allow
+              Action: 'bedrock:InvokeModel'
+              Resource:
+                - !Sub 'arn:${AWS::Partition}:bedrock:*::foundation-model/openai.*'
+                - !Sub 'arn:${AWS::Partition}:bedrock:*:*:inference-profile/*.openai.*'
+                - !Sub 'arn:${AWS::Partition}:bedrock:*:${AWS::AccountId}:project/default'
+              Condition:
+                StringEquals:
+                  'aws:RequestedRegion': !Ref AllowedBedrockRegions
+            - !Ref 'AWS::NoValue'
+          - !If
+            - OpenAIModelsAllowed
+            - Sid: AllowOpenAIInvokeGlobal
+              Effect: Allow
+              Action: 'bedrock:InvokeModel'
+              Resource: !Sub 'arn:${AWS::Partition}:bedrock:::foundation-model/openai.*'
+            - !Ref 'AWS::NoValue'
           # F-011: Enforced guardrails require callers to apply the selected
           # guardrail during model invocation.
           - Sid: AllowOwnAccountGuardrails

@@ -12,7 +12,7 @@ region = us-east-1
 ```
 
 A coding harness that resolves credentials through the **AWS SDK default
-chain**, such as OpenCode, Pi, or Aider (OpenAI Codex CLI for MCP tools only),
+chain**, such as OpenCode, ChatGPT Work and Codex, Pi, or Aider,
 can use the sample's controls with **no
 harness-specific auth work**. Generate ready-to-use configs with:
 
@@ -81,7 +81,7 @@ calls AWS STS directly can skip it; IAM policy still applies
 | **OIDC SSO login** (browser flow, token cache, silent refresh) | credential-process binary | Every harness identically |
 | **Quota enforcement** | credential-process checks quota **before vending credentials**; blocked users get no credentials at all | Every harness identically |
 | **Per-user cost attribution** | STS session name embeds the user identity → `line_item_iam_principal` in CUR 2.0 (see [COST_ATTRIBUTION.md](COST_ATTRIBUTION.md)) | Every harness identically |
-| **Model / region guardrails** | IAM policy on the assumed role (Anthropic-model allow-list via the `RestrictToAnthropicModels` parameter, region conditions) | Every harness identically |
+| **Model / region guardrails** | IAM policy on the assumed role (Anthropic-model allow-list via the `RestrictToAnthropicModels` parameter, opt-in OpenAI-on-bedrock-runtime via `AllowOpenAIModels`, region conditions) | Every harness identically |
 
 ## Per-harness setup
 
@@ -115,30 +115,91 @@ inference-profile IDs are used directly as keys:
 }
 ```
 
-### OpenAI Codex CLI
+### ChatGPT Work and Codex (desktop app, CLI, IDE extension)
 
-Live-verified with Codex 0.147.0 on 2026-08-14: it used the governed identity and
-received the expected explicit Mantle deny. This proves the governed deny path,
-not a successful Codex model invocation. Reference:
-<https://developers.openai.com/codex/amazon-bedrock>
+Live-verified with Codex CLI 0.160.0 on 2026-10-02 (sandbox account,
+`eu-central-1` source Region, generic OIDC federation, [LV-18](LIVE_VALIDATION.md#lv-18-chatgpt-work-and-codex-on-bedrock-runtime)):
+the generated config, unmodified, returned `bedrock-ok` on
+`global.openai.gpt-6-sol` through the governed `credential_process` profile.
+The Mantle provider was denied, the invocation log carried the user's
+identity, server-side metering priced the tokens for that user, and an
+exhausted budget refused credential issuance. The ChatGPT desktop app and IDE
+extension read the same configuration layers per OpenAI's docs but were
+**not live-tested** here. Reference (retrieved 2026-10-02):
+<https://learn.chatgpt.com/docs/amazon-bedrock>
 
-Config file: `~/.codex/config.toml` with `model_provider = "amazon-bedrock"`.
-AWS auth uses the SDK credential chain — the Codex docs explicitly support
-"Federated identity configured with `credential_process`", which is exactly
-this solution's profile. Set `AWS_PROFILE`/`AWS_REGION` in the shell (or in
-`~/.codex/.env` for the desktop app / IDE extension).
+Deployment prerequisites:
 
-> **Honest limitation:** Codex's Bedrock integration runs **OpenAI models
-> only**, through the Amazon Bedrock Mantle endpoint (Bedrock's
-> OpenAI-compatible Responses API); it does not run Claude models, so the
-> Claude CRIS IDs do not apply. Every governed credential policy carries an
-> explicit `DenyBedrockMantleEndpoint` (`bedrock-mantle:*`) statement, because
-> Mantle traffic is invisible to this platform's metering
-> ([ADR-0022](adr/0022-mantle-metering-deferred-tripwire.md)). Codex model calls
-> with governed credentials are therefore denied in every configuration;
-> setting `RestrictToAnthropicModels=false` does not change this. The generated
-> Codex config proves the governed deny path only. GovCloud Bedrock endpoints
-> are unsupported by Codex.
+| Setting | Why |
+|---|---|
+| `aws.allow_openai_models: true` (auth parameter `AllowOpenAIModels=true`) | Admits OpenAI models on bedrock-runtime ([ADR-0037](adr/0037-openai-models-on-bedrock-runtime.md)). Default `false` keeps the Anthropic-only policy. With IAM Identity Center the permission set decides instead ([IdC guide](providers/iam-identity-center-setup.md#chatgpt-work-and-codex-openai-models)). |
+| `metering.enabled: true`, `metering.mode: max` | Codex emits no Claude Code OTEL metrics, so only server-side metering counts its usage. With `shadow`, a ChatGPT-Work-only user is never blocked (verified live). |
+| `enable_finegrained_quotas: true` (for per-user or per-group budgets) | Otherwise one default limit applies to every user. |
+
+Generated files (`gip package --harnesses codex`):
+
+- `harnesses/codex/config.toml`, merged into `~/.codex/config.toml`:
+
+  ```toml
+  model_provider = "amazon-bedrock-runtime"
+  web_search = "disabled"
+  model = "global.openai.gpt-6-sol"   # us.openai.gpt-6-sol from us-* source Regions
+
+  [model_providers.amazon-bedrock-runtime.aws]
+  profile = "gip"
+  region = "eu-central-1"
+  ```
+
+- `harnesses/codex/codex.env`, merged into `~/.codex/.env` for the ChatGPT
+  desktop app and IDE extension (they may not inherit shell variables).
+- `harnesses/codex/requirements.toml`, optional, for administrators (see the
+  notes below).
+
+Notes:
+
+- **Use only the `amazon-bedrock-runtime` provider.** `amazon-bedrock` selects
+  Mantle, which the governed role policy denies in every configuration because Mantle
+  writes no invocation logs ([ADR-0022](adr/0022-mantle-metering-deferred-tripwire.md)).
+  IAM Identity Center users run on the permission set instead, so add the deny there
+  ([IdC guide](providers/iam-identity-center-setup.md#chatgpt-work-and-codex-openai-models)).
+- **OpenAI models only.** ChatGPT Work and Codex do not run Claude models on
+  Bedrock; the Claude CRIS IDs do not apply.
+- **Data residency.** The model cards of the GPT-5.x and GPT-6.x models that
+  ChatGPT Work uses list US Geo (`us.`) and Global
+  (`global.`) profiles on bedrock-runtime, and some models also an India (`in.`)
+  or GovCloud (`us-gov.`) Geo profile. From EU, AU or JP source Regions the only
+  option is Global CRIS, which can route prompts to commercial Regions
+  worldwide. The live `eu-central-1` call ran in `us-east-1`
+  (`inferenceRegion` in the invocation log). Invocation logs and quota
+  records stay in the deployment's Regions.
+- **Model control is IAM.** With `AllowOpenAIModels=true`, every `openai.*`
+  model the account can reach is admitted. The client-side model catalog
+  (`model_catalog_json`) is not a security boundary and is not generated.
+- **Optional admin `requirements.toml`.** `harnesses/codex/requirements.toml`
+  enforces `model_provider = "amazon-bedrock-runtime"`,
+  `allowed_login_methods = ["api"]` (blocks ChatGPT-account sign-in),
+  `allowed_web_search_modes = []` (only `disabled`) and
+  `[features] in_app_updates = false`. Users cannot override it. It is not
+  installed automatically: deploy it to `/etc/codex/requirements.toml`
+  (macOS, Linux), `%ProgramData%\OpenAI\Codex\requirements.toml` (Windows)
+  or the macOS MDM key `requirements_toml_base64` in domain `com.openai.codex`.
+  The login restriction is honored only in the system file or MDM, not in
+  cloud-managed policy. Schema:
+  <https://learn.chatgpt.com/docs/enterprise/managed-configuration> and the
+  `requirements.toml` section of
+  <https://learn.chatgpt.com/docs/config-file/config-reference> (retrieved
+  2026-10-02). Codex CLI 0.160.0's app-server schema lists the same keys
+  (`modelProvider`, `allowedLoginMethods`, `allowedWebSearchModes`,
+  `featureRequirements`). Enforcement was **not live-tested**: that needs a
+  system-wide file on the test machine.
+- **No hosted web search** on Bedrock Runtime. The AgentCore web-search MCP
+  stdio entry is still generated when web search is deployed (not live-tested
+  with Codex 0.160.0).
+- Unset `AWS_BEARER_TOKEN_BEDROCK`: Codex tries a Bedrock API key before the AWS
+  SDK credential chain, which would bypass the governed profile.
+- From GovCloud source Regions the generator leaves `model` unset: the default
+  GPT-6 Sol has no GovCloud profile. Some models list a `us-gov.` Geo profile on
+  their model card; set one manually after checking that card.
 
 ### Pi
 
@@ -250,10 +311,11 @@ equally to Cline and Continue — they ride the same profile.)
 | Quota blocking at credential issuance | ✅ | ✅ identical — checked before creds are vended |
 | Per-user CUR cost attribution (session name) | ✅ | ✅ identical |
 | IAM model/region guardrails | ✅ | ✅ identical |
-| Model inference with governed credentials | ✅ | ✅ OpenCode / Pi / Aider; ❌ Codex (Mantle endpoint denied, see [Codex](#openai-codex-cli)) |
+| Model inference with governed credentials | ✅ | ✅ OpenCode / Pi / Aider; ✅ ChatGPT Work / Codex on `amazon-bedrock-runtime` with `AllowOpenAIModels=true` (Mantle provider denied, see [ChatGPT Work and Codex](#chatgpt-work-and-codex-desktop-app-cli-ide-extension)) |
 | **Per-user OTEL telemetry → solution dashboards** | ✅ emits OTEL metrics | ❌ do **not** feed the solution's dashboards |
-| **Per-user usage visibility** | OTEL dashboards + CUR | Session-name CUR attribution; plus, when deployed, server-side metering from Bedrock invocation logs covers **all harnesses identically** ([design](designs/server-side-metering-design.md)) |
-| **Default model and optional model restriction via managed settings** | ✅ with `lock_default_model`, `managed-settings.json` (OS-managed, highest precedence) sets a default model, which is a default, not a lock. Adding `restrict_model_selection` restricts `/model` and `--model` to the model selected in `gip init` (Opus and Sonnet for opusplan) plus the Haiku-tier model, which background tasks use and users can also select, through `availableModels` and `enforceAvailableModels`; it needs Claude Code v2.1.175 or later. Both bind Claude Code only, and a local administrator can still edit the file | ❌ managed-settings is Claude-Code-only; these harnesses rely on the IAM `RestrictToAnthropicModels` allow-list (any permitted Anthropic model is selectable) |
+| **Per-user usage visibility** | OTEL dashboards + CUR | Session-name CUR attribution; plus, when deployed, server-side metering from Bedrock invocation logs covers **all harnesses identically** ([design](designs/server-side-metering-design.md)). ChatGPT Work / Codex budgets require metering mode `max` |
+| **Default model and optional model restriction via managed settings** | ✅ with `lock_default_model`, `managed-settings.json` (OS-managed, highest precedence) sets a default model, which is a default, not a lock. Adding `restrict_model_selection` restricts `/model` and `--model` to the model selected in `gip init` (Opus and Sonnet for opusplan) plus the Haiku-tier model, which background tasks use and users can also select, through `availableModels` and `enforceAvailableModels`; it needs Claude Code v2.1.175 or later. Both bind Claude Code only, and a local administrator can still edit the file | ❌ managed-settings is Claude-Code-only; these harnesses rely on the IAM `RestrictToAnthropicModels` allow-list (any permitted Anthropic model is selectable; with `AllowOpenAIModels=true`, ChatGPT Work / Codex can select any `openai.*` model) |
+| **Admin-enforced client policy** | ✅ `managed-settings.json` | ChatGPT Work / Codex: optional generated `requirements.toml` pins the `amazon-bedrock-runtime` provider, API-only login, no hosted web search, no in-app updates (not live-tested); ❌ OpenCode / Pi / Aider |
 | **Web search (AgentCore gateway MCP)** | ✅ native `headersHelper` (see [Platform tools](#platform-tools-mcp)) | ✅ OpenCode / Codex via the `--mcp-proxy` stdio shim; ❌ Pi / Aider (no MCP support upstream) |
 | **Claude apps gateway** | ✅ optional gateway integration | ❌ Claude-Code-only; other harnesses keep direct Bedrock access |
 

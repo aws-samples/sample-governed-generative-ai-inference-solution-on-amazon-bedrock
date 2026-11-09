@@ -137,3 +137,29 @@ class TestResidencyWarnings:
         from governed_inference_platform.models import DATA_RESIDENCY_PREFIXES
 
         assert DATA_RESIDENCY_GEOGRAPHIES == DATA_RESIDENCY_PREFIXES
+
+
+class TestOpenAIGlobalRoutingWarning:
+    """ADR-0037: OpenAI on bedrock-runtime has no eu/au/jp Geo profiles; there it is global.*."""
+
+    @pytest.mark.parametrize("geography", ["eu", "au", "jp"])
+    def test_strict_non_us_geography_warns_when_openai_admitted(self, geography):
+        region = {"eu": "eu-central-1", "au": "ap-southeast-2", "jp": "ap-northeast-1"}[geography]
+        warnings = residency_warnings(region, geography, web_search_enabled=False, allow_openai_models=True)
+        assert any("global.openai" in w for w in warnings)
+
+    def test_govcloud_warning_points_to_us_gov_profile_not_global(self):
+        # The generated Codex config leaves `model` unset in GovCloud; the warning must not
+        # suggest global.* (commercial Regions worldwide) for a GovCloud cell.
+        warnings = residency_warnings("us-gov-west-1", "us-gov", web_search_enabled=False, allow_openai_models=True)
+        openai = [w for w in warnings if "OpenAI" in w]
+        assert len(openai) == 1
+        assert "us-gov.openai" in openai[0]
+        assert "global.openai" not in openai[0]
+
+    def test_no_warning_when_openai_not_admitted(self):
+        warnings = residency_warnings("eu-central-1", "eu", web_search_enabled=False)
+        assert not any("OpenAI" in w for w in warnings)
+
+    def test_default_keyword_keeps_old_call_sites_working(self):
+        assert residency_warnings("eu-central-1", "eu", False) == []

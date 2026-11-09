@@ -1782,6 +1782,7 @@ class DeployCommand(Command):
                         f"IdentityPoolName={profile.identity_pool_name}",
                         f"AllowedBedrockRegions={','.join(bedrock_regions)}",
                         f"RestrictToAnthropicModels={str(getattr(profile, 'restrict_to_anthropic_models', True)).lower()}",
+                        f"AllowOpenAIModels={str(getattr(profile, 'allow_openai_models', False)).lower()}",
                         f"EnableMonitoring={str(profile.monitoring_enabled).lower()}",
                         f"MonitoringMode={_monitoring_mode_param(profile)}",
                     ]
@@ -1821,6 +1822,7 @@ class DeployCommand(Command):
                 params.append(
                     f"RestrictToAnthropicModels={str(getattr(profile, 'restrict_to_anthropic_models', True)).lower()}"
                 )
+                params.append(f"AllowOpenAIModels={str(getattr(profile, 'allow_openai_models', False)).lower()}")
 
                 # Opt-in sts:RoleSessionName trust-policy binding (ADR-0015).
                 # Default "none" renders today's trust policy unchanged.
@@ -3058,6 +3060,7 @@ class DeployCommand(Command):
                     f"IdentityPoolName={profile.identity_pool_name}",
                     f"AllowedBedrockRegions={','.join(bedrock_regions)}",
                     f"RestrictToAnthropicModels={str(getattr(profile, 'restrict_to_anthropic_models', True)).lower()}",
+                    f"AllowOpenAIModels={str(getattr(profile, 'allow_openai_models', False)).lower()}",
                     f"EnableMonitoring={str(profile.monitoring_enabled).lower()}",
                     f"MonitoringMode={_monitoring_mode_param(profile)}",
                 ]
@@ -3077,6 +3080,7 @@ class DeployCommand(Command):
                 params = [
                     f"FederationType={profile.federation_type}",
                     f"RestrictToAnthropicModels={str(getattr(profile, 'restrict_to_anthropic_models', True)).lower()}",
+                    f"AllowOpenAIModels={str(getattr(profile, 'allow_openai_models', False)).lower()}",
                     f"SessionNameBinding={getattr(profile, 'session_name_binding', 'none') or 'none'}",
                 ]
                 if profile.federation_type == "direct":
@@ -3201,6 +3205,8 @@ class DeployCommand(Command):
             console.print("\n[dim]# Step 2: Deploy packaged template[/dim]")
             monthly_limit = _quota_token_limit(profile)
             daily_limit = getattr(profile, "daily_token_limit", None)
+            # Same issuer and metering mode as the real quota deploy, so a copied command matches it.
+            oidc_issuer_url, oidc_client_id = self._resolve_oidc_config(profile)
             params = [
                 f"MonthlyTokenLimit={monthly_limit}",
                 f"WarningThreshold80={getattr(profile, 'warning_threshold_80', int(monthly_limit * 0.8))}",
@@ -3211,10 +3217,11 @@ class DeployCommand(Command):
                 f"QuotaMode={getattr(profile, 'quota_limit_type', 'token')}",
                 f"MonthlyCostLimitUsd={getattr(profile, 'monthly_cost_limit', 0)}",
                 f"DailyCostLimitUsd={getattr(profile, 'daily_cost_limit', 0)}",
-                f"OidcIssuerUrl={profile.provider_domain}",
-                f"OidcClientId={profile.client_id}",
+                f"OidcIssuerUrl={oidc_issuer_url}",
+                f"OidcClientId={oidc_client_id}",
                 f"EnableFinegrainedQuotas={str(profile.enable_finegrained_quotas).lower()}",
                 f"EnableBypassDetection={str(getattr(profile, 'enable_bypass_detection', False)).lower()}",
+                f"MeteringMode={getattr(profile, 'metering_mode', 'shadow') if getattr(profile, 'metering_enabled', False) else 'shadow'}",
             ]
             print_deploy_cmd("/tmp/quota-monitoring-packaged.yaml", stack_name, params)
 
@@ -3622,6 +3629,11 @@ class DeployCommand(Command):
                 )
             pool_region = pool_id.split("_")[0] if "_" in pool_id else profile.aws_region
             issuer_url = f"https://cognito-idp.{pool_region}.amazonaws.com/{pool_id}"
+        elif profile.provider_type == "generic" and getattr(profile, "oidc_issuer_url", None):
+            # A generic IdP's issuer can carry a path (Cognito user pool, Keycloak realm,
+            # OneLogin /oidc/2), so https://<domain> is not the token's iss claim. Use the
+            # explicit issuer, as the auth (IAM OIDC provider) and monitoring stacks do.
+            issuer_url = profile.oidc_issuer_url.rstrip("/")
         else:
             issuer_url = profile.provider_domain
             if issuer_url and not issuer_url.startswith(("http://", "https://")):

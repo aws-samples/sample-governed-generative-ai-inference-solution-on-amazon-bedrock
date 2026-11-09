@@ -38,7 +38,12 @@ _HERE = os.path.dirname(os.path.abspath(__file__))
 for _p in (_HERE, os.path.dirname(_HERE)):
     if _p not in sys.path:
         sys.path.insert(0, _p)
-from shared.pricing import calculate_cost, get_rates, resolve_model_family  # noqa: E402
+from shared.pricing import (  # noqa: E402
+    calculate_cost,
+    get_rates,
+    openai_long_context_family,
+    resolve_model_family,
+)
 
 # Configuration from environment
 QUOTA_TABLE = os.environ.get("QUOTA_TABLE", "UserQuotaMetrics")
@@ -55,7 +60,13 @@ TRANSACT_MAX_ITEMS = 100
 
 dynamodb = boto3.resource("dynamodb", region_name=QUOTA_TABLE_REGION)
 quota_table = dynamodb.Table(QUOTA_TABLE)
-ddb_client = dynamodb.meta.client
+# A PLAIN client, not dynamodb.meta.client: the resource's client re-serializes
+# every parameter with the high-level TypeSerializer, so the low-level
+# AttributeValues built below ({"N": "5"}) went on the wire as maps
+# ({"M": {"N": {"S": "5"}}}) and DynamoDB rejected every accrual with
+# "Incorrect operand type for operator or function; operator: ADD, operand
+# type: MAP" (found live 2026-10-02).
+ddb_client = boto3.client("dynamodb", region_name=QUOTA_TABLE_REGION)
 
 # Cache token fields are the design's open question #1: metadata-only delivery
 # may or may not include them, and AWS documents several spellings depending
@@ -423,9 +434,16 @@ def lambda_handler(event, context):
         seen_request_ids.add(parsed["request_id"])
 
         cache_keys_seen.update(parsed["cache_raw"].keys())
-        family = resolve_model_family(parsed["model_id"])
+        family = resolve_model_family(parsed["model_id"], rates=rates)
         if family == "unpriced_aip":
             unpriced_aip_models.add(parsed["model_id"])
+        # OpenAI cards bill the whole request at long-context rates above 272K
+        # input tokens (ADR-0037); no-op for every other family.
+        family = openai_long_context_family(
+            family,
+            parsed["input_tokens"] + parsed["cache_read_tokens"] + parsed["cache_write_tokens"],
+            rates,
+        )
         parsed["cost_usd"] = calculate_cost(
             parsed["input_tokens"],
             parsed["output_tokens"],

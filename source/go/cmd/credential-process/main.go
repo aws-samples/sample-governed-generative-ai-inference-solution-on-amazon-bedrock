@@ -656,6 +656,7 @@ func (a *credentialApp) authenticate() (*oidc.AuthResult, error) {
 		generic = &oidc.GenericEndpoints{
 			AuthorizeURL: a.cfg.OIDCAuthorizationEndpoint,
 			TokenURL:     a.cfg.OIDCTokenEndpoint,
+			Scopes:       a.cfg.OIDCScopes,
 		}
 	}
 	return oidc.Authenticate(

@@ -685,3 +685,33 @@ class TestManagedModelRestriction:
         config, errors = build_config_from_answers(load_answers_file(exported))
         assert errors == []
         assert config["restrict_model_selection"] is True and config["lock_default_model"] is True
+
+
+class TestGenericOidcScopes:
+    """Optional oidc_scopes override (OneLogin rejects offline_access on the code flow)."""
+
+    def test_scopes_are_saved_when_given(self, config_paths, tester, tmp_path):
+        answers = tmp_path / "answers.yaml"
+        answers.write_text(GENERIC_OIDC_YAML + 'oidc_scopes: "openid profile email groups"\n')
+
+        rc = tester.run(f"--from-file {answers} --profile-name generic-ci")
+
+        assert rc == 0
+        assert _load_profile(config_paths, "generic-ci")["oidc_scopes"] == "openid profile email groups"
+
+    def test_scopes_absent_stays_none(self, config_paths, tester, tmp_path):
+        answers = tmp_path / "answers.yaml"
+        answers.write_text(GENERIC_OIDC_YAML)
+
+        assert tester.run(f"--from-file {answers} --profile-name generic-ci") == 0
+        assert _load_profile(config_paths, "generic-ci")["oidc_scopes"] is None
+
+    def test_scopes_without_openid_rejected(self, config_paths, tester, tmp_path, capsys):
+        answers = tmp_path / "answers.yaml"
+        answers.write_text(GENERIC_OIDC_YAML + 'oidc_scopes: "profile email"\n')
+
+        rc = tester.run(f"--from-file {answers} --profile-name generic-ci")
+
+        assert rc == 1
+        assert "oidc_scopes" in capsys.readouterr().out
+        assert not (config_paths / "generic-ci.json").exists()

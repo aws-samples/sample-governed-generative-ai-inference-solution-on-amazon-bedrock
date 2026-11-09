@@ -1,4 +1,4 @@
-# ABOUTME: Pure generators for per-harness Bedrock config files (OpenCode, Codex, Pi, Aider).
+# ABOUTME: Pure generators for per-harness Bedrock config files (OpenCode, ChatGPT Work/Codex, Pi, Aider).
 # ABOUTME: Every harness reuses the same AWS profile whose credential_process handles SSO/quota.
 
 """Config generators for coding harnesses other than Claude Code.
@@ -54,6 +54,8 @@ class HarnessConfig:
     content: str
     setup_instructions: str  # markdown, assembled into harnesses/README.md
     source_url: str
+    # Additional (filename, content) pairs written next to ``filename``.
+    extra_files: tuple[tuple[str, str], ...] = ()
 
 
 def _default_model(model_ids: dict[str, str]) -> str | None:
@@ -162,22 +164,98 @@ IDs that Claude Code receives.
     )
 
 
+# ChatGPT Work / Codex on Bedrock Runtime (ADR-0037). Source:
+# https://learn.chatgpt.com/docs/amazon-bedrock (retrieved 2026-10-02):
+# `amazon-bedrock-runtime` calls https://bedrock-runtime.{region}.amazonaws.com/openai/v1
+# with CRIS inference-profile IDs; `amazon-bedrock` selects Mantle, which the
+# governed IAM policy denies (no invocation logs, ADR-0022).
+CODEX_RUNTIME_PROVIDER = "amazon-bedrock-runtime"
+CODEX_DEFAULT_OPENAI_MODEL = "openai.gpt-6-sol"
+
+# Admin-enforced requirements (requirements.toml). Schema sources, retrieved 2026-10-02:
+# https://learn.chatgpt.com/docs/enterprise/managed-configuration ("Admin-enforced
+# requirements", "Manage authentication locally", "Pin feature flags") and the
+# requirements.toml section of https://learn.chatgpt.com/docs/config-file/config-reference
+# (`model_provider`: "Enforce the model provider ID, overriding local and session
+# configuration"; `allowed_login_methods`: "`api` permits API authentication, including
+# Amazon Bedrock"; `allowed_web_search_modes = []` "effectively allows only disabled";
+# `features.in_app_updates`: "Set to false in requirements.toml to disable in-app
+# updates"). Codex CLI 0.160.0's app-server schema (ConfigRequirements) carries the
+# same four keys: modelProvider, allowedLoginMethods, allowedWebSearchModes,
+# featureRequirements.
+CODEX_REQUIREMENTS_TOML = f"""# Admin-enforced requirements for ChatGPT Work and Codex on Amazon Bedrock Runtime.
+# OPTIONAL and for administrators only: users cannot override these values.
+# This file is NOT read from ~/gip or ~/.codex. Deploy it to one of:
+#   macOS / Linux: /etc/codex/requirements.toml
+#   Windows:       %ProgramData%\\OpenAI\\Codex\\requirements.toml
+#   macOS MDM:     preference domain com.openai.codex, key requirements_toml_base64
+#                  (base64 of this file, no line wrapping)
+# Schema: https://learn.chatgpt.com/docs/enterprise/managed-configuration
+#         https://learn.chatgpt.com/docs/config-file/config-reference (requirements.toml)
+#
+# This is a client-side control. The security boundary stays in IAM: the governed
+# role denies bedrock-mantle and admits OpenAI models only with AllowOpenAIModels=true.
+
+# Pin the Bedrock Runtime provider. Selecting `amazon-bedrock` (Mantle) is denied by
+# IAM anyway, because Mantle writes no invocation logs and cannot be metered.
+model_provider = "{CODEX_RUNTIME_PROVIDER}"
+
+# API authentication only (covers Amazon Bedrock). Blocks ChatGPT-account sign-in.
+# Honored only in the local system file or macOS MDM, not in cloud-managed policy.
+allowed_login_methods = ["api"]
+
+# Hosted web search is not available on Bedrock Runtime. An empty list allows only
+# "disabled".
+allowed_web_search_modes = []
+
+[features]
+# Disables the ChatGPT desktop app's own updater. Ship app updates with your
+# software deployment tool instead, or delete this line to keep in-app updates.
+in_app_updates = false
+"""
+
+
+def codex_runtime_model(aws_region: str) -> str | None:
+    """Default ChatGPT Work / Codex model ID for a Bedrock source Region.
+
+    The GPT-5.x/6.x OpenAI models on bedrock-runtime are CRIS-only (no in-Region
+    IDs; the GPT-OSS models differ). US source Regions get the US Geo profile
+    (``us.``), which keeps inference in the US; every other commercial Region
+    gets the Global profile (``global.``), which can route worldwide (the GPT-6 Sol model card lists eu-* source Regions as
+    Global-only; ca-* also list US Geo, which the generator does not select).
+    Returns None for AWS GovCloud, where the default model has no profile (some
+    models list a ``us-gov.`` Geo profile instead).
+    Source: https://docs.aws.amazon.com/bedrock/latest/userguide/model-card-openai-gpt-6-sol.html
+    (retrieved 2026-10-02).
+    """
+    if aws_region.startswith("us-gov-"):
+        return None
+    if aws_region.startswith("us-"):
+        return f"us.{CODEX_DEFAULT_OPENAI_MODEL}"
+    return f"global.{CODEX_DEFAULT_OPENAI_MODEL}"
+
+
 def generate_codex_config(
     aws_profile_name: str,
     aws_region: str,
     model_ids: dict[str, str],
     mcp_proxy: McpProxyConfig | None = None,
 ) -> HarnessConfig:
-    """Generate ~/.codex/config.toml snippet for OpenAI Codex CLI on Bedrock.
+    """Generate ~/.codex/config.toml (+ ~/.codex/.env) for ChatGPT Work and Codex.
 
-    Format source: https://developers.openai.com/codex/amazon-bedrock
-    - `model_provider = "amazon-bedrock"` selects the built-in Bedrock (Mantle)
-      provider; model selection is optional and limited to OpenAI model IDs
-      (e.g. openai.gpt-5.5) — Codex's Bedrock path does NOT run Claude models,
-      so the Claude CRIS IDs used by other harnesses do not apply here.
-    - AWS auth uses the SDK credential chain; the docs explicitly support
-      "Federated identity configured with credential_process" via a named
-      profile (AWS_PROFILE), which is exactly what this solution installs.
+    Format source: https://learn.chatgpt.com/docs/amazon-bedrock (retrieved 2026-10-02)
+    - ``model_provider = "amazon-bedrock-runtime"`` selects the Bedrock Runtime
+      endpoint (CRIS profiles, invocation logs). The ChatGPT desktop app, Codex
+      CLI, IDE extension and SDK read the same local configuration layers.
+    - ``web_search = "disabled"``: hosted web search is not available on
+      Runtime (the same page).
+    - ``[model_providers.amazon-bedrock-runtime.aws] profile/region`` pins the
+      AWS profile whose credential_process is the solution's binary. The
+      config reference documents these keys for ``amazon-bedrock``; Codex CLI
+      0.160.0 honored them for ``amazon-bedrock-runtime`` in the 2026-10-02
+      live test (docs/LIVE_VALIDATION.md LV-18).
+    - The desktop app and IDE extension may not inherit shell variables, so
+      the same values also go into ``~/.codex/.env`` (extra file ``codex.env``).
 
     MCP (web search): Codex's native streamable-HTTP auth
     (``bearer_token_env_var`` / ``http_headers`` / ``env_http_headers``) is
@@ -186,26 +264,44 @@ def generate_codex_config(
     ``[mcp_servers.<id>]`` entry through the credential-process ``--mcp-proxy``
     shim instead (format source: https://developers.openai.com/codex/config-reference).
     """
-    source_url = "https://developers.openai.com/codex/amazon-bedrock"
-    # model_ids (Claude tiers) intentionally unused: Codex on Bedrock supports
-    # OpenAI models only (see source_url, "Supported models").
+    source_url = "https://learn.chatgpt.com/docs/amazon-bedrock"
+    # model_ids (Claude tiers) intentionally unused: ChatGPT Work / Codex on
+    # Bedrock run OpenAI models only (see source_url, "Supported models").
     _ = model_ids
-    content = f"""# OpenAI Codex CLI on Amazon Bedrock (Mantle path).
-# Merge into ~/.codex/config.toml
+    model = codex_runtime_model(aws_region)
+    if model is None:
+        model_line = "# model = <set an OpenAI inference-profile ID available in this Region>"
+        residency_note = (
+            "# The default model (GPT-6 Sol) has no AWS GovCloud profile. Set `model` to a\n"
+            "# us-gov.openai.* profile listed on its model card after confirming availability.\n"
+        )
+    else:
+        model_line = f'model = "{model}"'
+        residency_note = ""
+        if model.startswith("global."):
+            residency_note = (
+                f"# DATA RESIDENCY: from {aws_region} this default uses Global cross-Region\n"
+                f"# inference, which can route requests to commercial AWS Regions worldwide.\n"
+                f"# Confirm this meets your residency policy, or set a Geo profile from the model card.\n"
+            )
+    content = f"""# ChatGPT Work and Codex (desktop app, CLI, IDE extension) on Amazon Bedrock Runtime.
+# Merge into ~/.codex/config.toml. Do not use the `amazon-bedrock` (Mantle) provider:
+# the governed IAM policy denies bedrock-mantle because Mantle writes no invocation
+# logs, so its usage could not be metered (ADR-0022, ADR-0037).
 # Format source: {source_url}
 #
-# Authentication: Codex resolves AWS SDK credentials from the named profile.
-# Set in your shell (or in ~/.codex/.env for the desktop app / IDE extension):
-#   export AWS_PROFILE={aws_profile_name}
-#   export AWS_REGION={aws_region}
-# The "{aws_profile_name}" profile's credential_process handles OIDC SSO login,
-# quota enforcement, and per-user session-name attribution.
+# Authentication: the "{aws_profile_name}" AWS profile's credential_process handles
+# OIDC SSO login, quota enforcement, and per-user session-name attribution.
+# Make sure AWS_BEARER_TOKEN_BEDROCK is NOT set: Codex checks a Bedrock API key
+# before the AWS SDK credential chain.
 
-model_provider = "amazon-bedrock"
+model_provider = "{CODEX_RUNTIME_PROVIDER}"
+web_search = "disabled"
+{residency_note}{model_line}
 
-# NOTE: Codex on Bedrock supports OpenAI models only (not Claude).
-# Supplying a model is optional; supported IDs per the docs include:
-model = "openai.gpt-5.5"
+[model_providers.{CODEX_RUNTIME_PROVIDER}.aws]
+profile = "{aws_profile_name}"
+region = "{aws_region}"
 """
     mcp_instructions = ""
     if mcp_proxy:
@@ -226,37 +322,55 @@ args = {args}
 server through the credential-process `--mcp-proxy` shim, so the gateway bearer token is
 refreshed per request (Codex's native `bearer_token_env_var`/`http_headers` are static and
 break after the ~1h token TTL). Requires the solution installer to have resolved
-`{CREDENTIAL_PROCESS_PLACEHOLDER}` in this file.
+`{CREDENTIAL_PROCESS_PLACEHOLDER}` in this file. Hosted web search stays disabled on
+Bedrock Runtime.
 """
-    instructions = f"""### OpenAI Codex CLI
+    env_content = f"""# Merge into ~/.codex/.env (%USERPROFILE%\\.codex\\.env on Windows), then restart
+# the ChatGPT desktop app or IDE extension. They may not inherit shell variables.
+# Format source: {source_url} ("Desktop app and IDE extension")
+AWS_PROFILE={aws_profile_name}
+AWS_REGION={aws_region}
+"""
+    residency_md = ""
+    if model and model.startswith("global."):
+        residency_md = (
+            f"\n**Data residency:** from `{aws_region}` the default model `{model}` uses Global "
+            "cross-Region inference, which can route requests to commercial AWS Regions worldwide. "
+            "Set a Geo profile from the model card instead if one is listed for this Region.\n"
+        )
+    instructions = f"""### ChatGPT Work and Codex (desktop app, CLI, IDE extension)
 
 Config format: [{source_url}]({source_url})
 
 1. Run the solution installer first (it creates the `{aws_profile_name}` AWS profile).
 2. Merge `~/gip/harnesses/codex/config.toml` into `~/.codex/config.toml`.
-3. Export the profile and region (or add them to `~/.codex/.env` for the desktop
-   app / VS Code extension, which do not inherit shell variables):
+3. For the ChatGPT desktop app or IDE extension, also merge
+   `~/gip/harnesses/codex/codex.env` into `~/.codex/.env` and restart the app.
+4. Confirm `/status` in Codex CLI shows provider `{CODEX_RUNTIME_PROVIDER}`, then send
+   `Reply with exactly: bedrock-ok`.
 
-   ```bash
-   export AWS_PROFILE={aws_profile_name}
-   export AWS_REGION={aws_region}
-   ```
+**Administrators (optional):** `~/gip/harnesses/codex/requirements.toml` enforces
+`model_provider = "{CODEX_RUNTIME_PROVIDER}"`, API-only login, no hosted web search and
+no in-app updates. Users cannot override it. Deploy it to `/etc/codex/requirements.toml`
+(macOS, Linux), `%ProgramData%\\OpenAI\\Codex\\requirements.toml` (Windows) or the
+macOS MDM key `com.openai.codex` / `requirements_toml_base64`. It is a client-side
+control; IAM remains the boundary.
 
-**Model caveat (honest limitation):** Codex's Bedrock integration runs *OpenAI* models
-(`openai.gpt-5.5`, `openai.gpt-5.4`) via Bedrock's OpenAI-compatible Responses API. It does
-not run Claude models, so the Claude CRIS model IDs used by the other harnesses do not
-apply. Ensure the OpenAI model is available in `{aws_region}` and permitted by your IAM
-policy (the default `RestrictToAnthropicModels=true` deployment blocks non-Anthropic
-models — set it to `false` if Codex should work). Credential flow (SSO, quota, session-name
-attribution) is identical: Codex's docs explicitly support `credential_process` federation.
-{mcp_instructions}"""
+**Requires the deployment to admit OpenAI models:** `allow_openai_models: true`
+(auth stack parameter `AllowOpenAIModels=true`). Without it the IAM policy denies
+OpenAI models. The `amazon-bedrock` (Mantle) provider is always denied. Budgets only
+count ChatGPT Work / Codex usage with server-side metering in `max` mode
+(`metering.enabled: true`, `metering.mode: max`), because Codex does not emit
+Claude Code telemetry.
+{residency_md}{mcp_instructions}"""
     return HarnessConfig(
         harness="codex",
-        display_name="OpenAI Codex CLI",
+        display_name="ChatGPT Work / Codex",
         filename="config.toml",
         content=content,
         setup_instructions=instructions,
         source_url=source_url,
+        extra_files=(("codex.env", env_content), ("requirements.toml", CODEX_REQUIREMENTS_TOML)),
     )
 
 

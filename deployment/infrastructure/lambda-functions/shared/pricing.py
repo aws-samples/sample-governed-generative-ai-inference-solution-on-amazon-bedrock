@@ -120,6 +120,96 @@ DEFAULT_RATES = {
     },
 }
 
+# OpenAI models on the bedrock-runtime endpoint (ChatGPT Work / Codex, ADR-0037).
+# Standard tier, short context (<= 272K input tokens), USD per 1M tokens. Global
+# CRIS (global.* profiles) carries no premium; US Geo CRIS (us.* profiles) and
+# Mantle in-Region carry a 10% premium, so they are separate families. Cache
+# write is the card's "Input — cache write" column (1.25x input).
+# Sources (all retrieved 2026-10-02):
+#   GPT-6 Sol    https://docs.aws.amazon.com/bedrock/latest/userguide/model-card-openai-gpt-6-sol.html
+#   GPT-6 Luna   https://docs.aws.amazon.com/bedrock/latest/userguide/model-card-openai-gpt-6-luna.html
+#   GPT-6 Astra  https://docs.aws.amazon.com/bedrock/latest/userguide/model-card-openai-gpt-6-astra.html
+#   GPT-6.1 Sol  https://docs.aws.amazon.com/bedrock/latest/userguide/model-card-openai-gpt-6-1-sol.html
+#   GPT-5.6 Sol  https://docs.aws.amazon.com/bedrock/latest/userguide/model-card-openai-gpt-56-sol.html
+#   GPT-5.6 Terra https://docs.aws.amazon.com/bedrock/latest/userguide/model-card-openai-gpt-56-terra.html
+#   GPT-5.6 Luna https://docs.aws.amazon.com/bedrock/latest/userguide/model-card-openai-gpt-56-luna.html
+# Long context: when a request's input exceeds 272K tokens the cards bill the
+# WHOLE request at the long-context rate; those rows are the "-long" families
+# below, selected by openai_long_context_family() in the metering processor.
+OPENAI_RATES = {
+    "openai-gpt-6-sol-global": {"input": 2.00, "output": 10.00, "cache_read": 0.20, "cache_write": 2.50},
+    "openai-gpt-6-sol-us": {"input": 2.20, "output": 11.00, "cache_read": 0.22, "cache_write": 2.75},
+    "openai-gpt-6-luna-global": {"input": 0.10, "output": 0.50, "cache_read": 0.01, "cache_write": 0.125},
+    "openai-gpt-6-luna-us": {"input": 0.11, "output": 0.55, "cache_read": 0.011, "cache_write": 0.1375},
+    "openai-gpt-6-astra-global": {"input": 10.00, "output": 50.00, "cache_read": 1.00, "cache_write": 12.50},
+    "openai-gpt-6-astra-us": {"input": 11.00, "output": 55.00, "cache_read": 1.10, "cache_write": 13.75},
+    "openai-gpt-6-1-sol-global": {"input": 2.00, "output": 10.00, "cache_read": 0.10, "cache_write": 2.50},
+    "openai-gpt-6-1-sol-us": {"input": 2.20, "output": 11.00, "cache_read": 0.11, "cache_write": 2.75},
+    "openai-gpt-5-6-sol-global": {"input": 4.00, "output": 20.00, "cache_read": 0.40, "cache_write": 5.00},
+    "openai-gpt-5-6-sol-us": {"input": 4.40, "output": 22.00, "cache_read": 0.44, "cache_write": 5.50},
+    "openai-gpt-5-6-terra-global": {"input": 2.00, "output": 12.00, "cache_read": 0.20, "cache_write": 2.50},
+    "openai-gpt-5-6-terra-us": {"input": 2.20, "output": 13.20, "cache_read": 0.22, "cache_write": 2.75},
+    "openai-gpt-5-6-luna-global": {"input": 0.20, "output": 1.20, "cache_read": 0.02, "cache_write": 0.25},
+    "openai-gpt-5-6-luna-us": {"input": 0.22, "output": 1.32, "cache_read": 0.022, "cache_write": 0.275},
+    # Long context (> 272K input tokens), same cards.
+    "openai-gpt-6-sol-global-long": {"input": 4.00, "output": 15.00, "cache_read": 0.40, "cache_write": 5.00},
+    "openai-gpt-6-sol-us-long": {"input": 4.40, "output": 16.50, "cache_read": 0.44, "cache_write": 5.50},
+    "openai-gpt-6-luna-global-long": {"input": 0.20, "output": 0.75, "cache_read": 0.02, "cache_write": 0.25},
+    "openai-gpt-6-luna-us-long": {"input": 0.22, "output": 0.825, "cache_read": 0.022, "cache_write": 0.275},
+    "openai-gpt-6-astra-global-long": {"input": 20.00, "output": 75.00, "cache_read": 2.00, "cache_write": 25.00},
+    "openai-gpt-6-astra-us-long": {"input": 22.00, "output": 82.50, "cache_read": 2.20, "cache_write": 27.50},
+    "openai-gpt-6-1-sol-global-long": {"input": 4.00, "output": 15.00, "cache_read": 0.20, "cache_write": 5.00},
+    "openai-gpt-6-1-sol-us-long": {"input": 4.40, "output": 16.50, "cache_read": 0.22, "cache_write": 5.50},
+    "openai-gpt-5-6-sol-global-long": {"input": 8.00, "output": 30.00, "cache_read": 0.80, "cache_write": 10.00},
+    "openai-gpt-5-6-sol-us-long": {"input": 8.80, "output": 33.00, "cache_read": 0.88, "cache_write": 11.00},
+    "openai-gpt-5-6-terra-global-long": {"input": 4.00, "output": 18.00, "cache_read": 0.40, "cache_write": 5.00},
+    "openai-gpt-5-6-terra-us-long": {"input": 4.40, "output": 19.80, "cache_read": 0.44, "cache_write": 5.50},
+    "openai-gpt-5-6-luna-global-long": {"input": 0.40, "output": 1.80, "cache_read": 0.04, "cache_write": 0.50},
+    "openai-gpt-5-6-luna-us-long": {"input": 0.44, "output": 1.98, "cache_read": 0.044, "cache_write": 0.55},
+}
+DEFAULT_RATES.update(OPENAI_RATES)
+
+# Long-context threshold from the OpenAI model cards above (input tokens).
+OPENAI_LONG_CONTEXT_THRESHOLD = 272_000
+
+# (substring of the lowercased model ID, family stem). Order matters: the
+# longer "gpt-6.1-sol" must match before "gpt-6-sol" cannot (distinct strings,
+# but keep specific-first for future additions).
+OPENAI_MODEL_FAMILIES = (
+    ("gpt-6.1-sol", "openai-gpt-6-1-sol"),
+    ("gpt-6-sol", "openai-gpt-6-sol"),
+    ("gpt-6-luna", "openai-gpt-6-luna"),
+    ("gpt-6-astra", "openai-gpt-6-astra"),
+    ("gpt-5.6-sol", "openai-gpt-5-6-sol"),
+    ("gpt-5.6-terra", "openai-gpt-5-6-terra"),
+    ("gpt-5.6-luna", "openai-gpt-5-6-luna"),
+)
+
+# An OpenAI model ID not in OPENAI_MODEL_FAMILIES (a new release, GPT-5.5,
+# GPT-5.4, or an un-carded variant) is metered at the highest Standard-tier
+# rate configured here (GPT-6 Astra, US Geo) with a structured WARNING: an
+# over-estimate blocks a budget early, an under-estimate would let spend
+# through. Override via BEDROCK_PRICING_RATES_JSON under "openai-unpriced".
+OPENAI_UNPRICED_FAMILY = "openai-unpriced"
+DEFAULT_RATES[OPENAI_UNPRICED_FAMILY] = dict(OPENAI_RATES["openai-gpt-6-astra-us"])
+DEFAULT_RATES[OPENAI_UNPRICED_FAMILY + "-long"] = dict(OPENAI_RATES["openai-gpt-6-astra-us-long"])
+
+
+def openai_long_context_family(family: str, input_side_tokens: int, rates: dict | None = None) -> str:
+    """Switch an OpenAI family to its long-context rates above 272K input tokens.
+
+    ``input_side_tokens`` should be every input-side token of ONE request
+    (uncached input plus cache read plus cache write): counting cached tokens
+    toward the threshold can only select the higher rate earlier. Non-OpenAI
+    families are returned unchanged.
+    """
+    if not family.startswith("openai-") or input_side_tokens <= OPENAI_LONG_CONTEXT_THRESHOLD:
+        return family
+    long_family = family + "-long"
+    effective = DEFAULT_RATES if rates is None else rates
+    return long_family if long_family in effective else family
+
+
 # Default model family when model cannot be resolved
 DEFAULT_FAMILY = "sonnet"
 
@@ -286,6 +376,54 @@ def _resolve_legacy_family(entry, model_id, now, rates):
     return standard
 
 
+def _openai_route(model_lower):
+    """Pricing route for an OpenAI model ID: 'global' or 'us'.
+
+    The invocation log ``modelId`` is the inference-profile ID the client sent
+    (e.g. ``global.openai.gpt-6-sol``; verified live 2026-10-02), so the CRIS
+    prefix tells the route. ``global.`` is the no-premium Global rate. ``us.``
+    is US Geo CRIS. Anything else (a bare ``openai.*`` ID, an ARN, an unknown
+    Geo prefix such as ``in.`` or ``us-gov.``) is priced at the premium ``us``
+    rate, the higher of the two Standard-tier routes configured here, with a
+    WARNING. GovCloud Geo rates on the cards are higher still and are not
+    configured (override via BEDROCK_PRICING_RATES_JSON).
+    """
+    tail = model_lower.rsplit("/", 1)[-1]
+    if tail.startswith("global."):
+        return "global"
+    return "us"
+
+
+def _resolve_openai_family(model_id, model_lower):
+    for match, stem in OPENAI_MODEL_FAMILIES:
+        if match in model_lower:
+            route = _openai_route(model_lower)
+            tail = model_lower.rsplit("/", 1)[-1]
+            if route == "us" and not tail.startswith("us."):
+                _warn_once(
+                    "openai_route_unknown",
+                    model_id,
+                    {
+                        "metered_family": f"{stem}-us",
+                        "detail": "OpenAI model ID without a global./us. CRIS prefix; metered at the premium US Geo rate",
+                    },
+                )
+            return f"{stem}-{route}"
+    _warn_once(
+        "unpriced_openai_model",
+        model_id,
+        {
+            "metered_family": OPENAI_UNPRICED_FAMILY,
+            "detail": (
+                "no published Bedrock rate is configured for this OpenAI model; metering at the highest "
+                "configured Standard-tier OpenAI rate (GPT-6 Astra, US Geo). Add the model card rate to "
+                "OPENAI_RATES or override 'openai-unpriced' via BEDROCK_PRICING_RATES_JSON."
+            ),
+        },
+    )
+    return OPENAI_UNPRICED_FAMILY
+
+
 def get_rates() -> dict:
     """Get pricing rates, with optional env var override.
 
@@ -340,6 +478,8 @@ def resolve_model_family(model_id: str, now=None, rates: dict | None = None) -> 
     model_lower = model_id.lower()
     if ":application-inference-profile/" in model_lower:
         return "unpriced_aip"
+    if "openai." in model_lower:
+        return _resolve_openai_family(model_id, model_lower)
     for entry in LEGACY_MODEL_PRICING:
         if entry["match"] in model_lower:
             if rates is None:

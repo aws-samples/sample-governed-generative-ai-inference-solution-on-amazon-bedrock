@@ -95,3 +95,23 @@ def test_governed_bedrock_credentials_explicitly_deny_mantle(template_name):
 def test_non_runtime_agentcore_gateway_does_not_reference_mantle(template_name):
     text = (INFRA_DIR / template_name).read_text(encoding="utf-8")
     assert "bedrock-mantle" not in text
+
+
+@pytest.mark.parametrize("template_name", GOVERNED_BEDROCK_TEMPLATES)
+def test_mantle_deny_is_unconditional_and_first_even_with_openai_admitted(template_name):
+    """ADR-0037: admitting OpenAI on bedrock-runtime must not touch the Mantle deny (ADR-0022)."""
+    doc = _load_template(template_name)
+    policies = [r for r in doc["Resources"].values() if r.get("Type") == "AWS::IAM::ManagedPolicy"]
+    assert len(policies) == 1
+    statements = policies[0]["Properties"]["PolicyDocument"]["Statement"]
+    # First statement, a plain dict (never wrapped in !If), so no parameter can remove it.
+    assert statements[0] == {
+        "Sid": "DenyBedrockMantleEndpoint",
+        "Effect": "Deny",
+        "Action": "bedrock-mantle:*",
+        "Resource": "*",
+    }
+    openai_gated = [s for s in statements if isinstance(s, list) and s and s[0] == "OpenAIModelsAllowed"]
+    assert openai_gated, "expected the AllowOpenAIModels statements"
+    for _cond, statement, _novalue in openai_gated:
+        assert all(not a.startswith("bedrock-mantle:") for a in _actions(statement))

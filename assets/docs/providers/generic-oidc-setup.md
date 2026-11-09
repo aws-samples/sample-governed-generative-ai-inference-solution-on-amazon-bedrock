@@ -1,4 +1,4 @@
-# Generic OIDC Setup Guide (PingFederate, Keycloak, ForgeRock, etc.)
+# Generic OIDC Setup Guide (PingFederate, Keycloak, ForgeRock, OneLogin, etc.)
 
 This guide covers setting up a generic OIDC identity provider for use with Amazon Bedrock. Use this path when your IdP is **not** Okta, Auth0, Microsoft Entra ID (Azure AD), or AWS Cognito User Pool — for example PingFederate, Keycloak, ForgeRock, or a custom OIDC-compliant deployment.
 
@@ -11,7 +11,7 @@ This guide covers setting up a generic OIDC identity provider for use with Amazo
 3. [Collect Required Information](#3-collect-required-information)
 4. [Run gip init](#4-run-gip-init)
 5. [Worked Example: PingFederate](#5-worked-example-pingfederate)
-6. [Worked Example: Keycloak](#6-worked-example-keycloak)
+6. [Worked Example: Keycloak](#6-worked-example-keycloak) (and [OneLogin notes](#onelogin-notes))
 7. [Troubleshooting](#7-troubleshooting)
 
 ---
@@ -38,7 +38,7 @@ The exact UI varies by product, but every IdP needs you to configure these prope
 | Application / client type | **Public client** (or "native", "SPA", "desktop") | Confidential client requires a client secret — only Azure AD currently supports that path here. |
 | Grant types | **Authorization Code** with **PKCE** | Refresh tokens optional but recommended. |
 | Redirect URI | `http://localhost:8400/callback` | Exact match. The credential helper auto-falls-back to a random port if 8400 is taken — if your IdP requires that to be allowlisted too, see [Troubleshooting](#7-troubleshooting). |
-| Scopes | `openid`, `profile`, `email` | `groups` if you plan to use group-based quotas. |
+| Scopes | `openid`, `profile`, `email` | `groups` if you plan to use group-based quotas. The credential-process also requests `offline_access` unless `oidc_scopes` is set (see [OneLogin notes](#onelogin-notes)). |
 | ID token signing | **RS256** or stronger | HS256 is not supported by the credential helper. |
 
 Do **not** set a client secret. The credential helper uses PKCE instead.
@@ -156,6 +156,24 @@ Keycloak's URL layout is realm-scoped:
 11. Save.
 
 `gip init` discovery will work against the realm-scoped issuer URL.
+
+### OneLogin notes
+
+OneLogin works through the generic OIDC path. The setup is the same as above, with these OneLogin-specific points (sources retrieved 2026-10-02):
+
+- **Issuer and endpoints.** Issuer `https://<subdomain>.onelogin.com/oidc/2`; `gip init` discovers the endpoints from `/.well-known/openid-configuration`.
+- **PKCE.** On the app's SSO tab, set **Token Endpoint** authentication to **None (PKCE)**. Do not set a client secret ([OneLogin: Auth Code Flow + PKCE](https://developers.onelogin.com/openid-connect/guides/auth-flow-pkce)).
+- **Scopes: no `offline_access`.** For generic providers the credential-process requests `openid profile email offline_access` by default. OneLogin rejects that: "The "offline_access" scope is not supported on this grant type and will return an error if provided" ([OneLogin: Auth Code Flow pt. 1](https://developers.onelogin.com/openid-connect/api/authorization-code)). Set the scopes in the answers file or profile:
+
+  ```yaml
+  oidc_scopes: "openid profile email groups"
+  ```
+
+  Without `oidc_scopes` the default is unchanged, so other IdPs are not affected.
+- **Refresh Token Timeout must be set.** OneLogin returns a `refresh_token` "Only returned if a Refresh Token Timeout period has specified in your OpenId Connect app settings" ([OneLogin: Auth Code Flow pt. 2](https://developers.onelogin.com/openid-connect/api/authorization-code-grant)). Without it the credential-process cannot refresh silently, and users sign in through the browser each time the ID token expires (60 minutes by default for this flow, per the [OneLogin OIDC connector article](https://onelogin.service-now.com/kb?id=kb_article_view&sysparm_article=KB0010435)).
+- **Groups for per-group budgets.** Request the `groups` scope **and** map the Groups parameter on the app's Parameters tab (for example to User Roles). "If the user does not belong to any roles then the groups claim will not be returned" ([OneLogin: Scopes](https://developers.onelogin.com/openid-connect/scopes)). The quota check reads the standard `groups` claim.
+- **Redirect URI.** The credential-process supports one redirect form: the loopback `http://localhost:8400/callback` (or the port in `redirect_port` / `REDIRECT_PORT`), with Authorization Code + PKCE. It does not support custom-scheme (native app) redirects or the OIDC device code flow; device authorization exists only for IAM Identity Center. OneLogin accepts `http://localhost` but describes it as "permitted for development purposes only and should not be used in production" (same connector article). Loopback redirects for native apps are the pattern in [RFC 8252, section 7.3](https://www.rfc-editor.org/rfc/rfc8252#section-7.3). Review this with the OneLogin administrator before production. Supporting a custom-scheme redirect or OneLogin's [device code flow](https://developers.onelogin.com/openid-connect/api/device-code-auth) would need changes to the credential-process.
+- Not live-tested against a OneLogin tenant in this sample repository. The generic OIDC path was tested with an Amazon Cognito user pool.
 
 ---
 

@@ -288,6 +288,43 @@ They are the statements of the same names in `bedrock-auth-okta.yaml`. Replace `
 
 The OTLP grant lets any user of the permission set write metrics under any identity; see the sidecar caveat in [Quota Monitoring](../QUOTA_MONITORING.md#current-limitations).
 
+#### ChatGPT Work and Codex (OpenAI models)
+
+`allow_openai_models: true` adds `AllowOpenAIInvokeRegional` and `AllowOpenAIInvokeGlobal` to the policy of `BedrockIDCRole` ([ADR-0037](../adr/0037-openai-models-on-bedrock-runtime.md)). For the same reason as above, that does not change what IAM Identity Center users can call: the permission set decides. A permission set with the broad `bedrock:InvokeModel*` on `*` example above already allows OpenAI models; a narrower permission set needs the two statements below, which are the statements of the same names in `bedrock-auth-okta.yaml`. Use the same placeholders as above. They were live-tested with generic OIDC federation, not with IAM Identity Center.
+
+```json
+{
+    "Sid": "AllowOpenAIInvokeRegional",
+    "Effect": "Allow",
+    "Action": "bedrock:InvokeModel",
+    "Resource": [
+        "arn:aws:bedrock:*::foundation-model/openai.*",
+        "arn:aws:bedrock:*:*:inference-profile/*.openai.*",
+        "arn:aws:bedrock:*:<ACCOUNT_ID>:project/default"
+    ],
+    "Condition": {
+        "StringEquals": {"aws:RequestedRegion": ["<REGION_1>", "<REGION_2>"]}
+    }
+},
+{
+    "Sid": "AllowOpenAIInvokeGlobal",
+    "Effect": "Allow",
+    "Action": "bedrock:InvokeModel",
+    "Resource": "arn:aws:bedrock:::foundation-model/openai.*"
+}
+```
+
+The same applies to `DenyBedrockMantleEndpoint`, the statement that keeps ChatGPT Work and Codex off the Mantle (`bedrock-mantle`) endpoint, which writes no invocation logs ([ADR-0022](../adr/0022-mantle-metering-deferred-tripwire.md)). It is part of `BedrockIDCRole`'s policy, so it does not apply to IAM Identity Center users either. The example permission set above allows no `bedrock-mantle` actions, so Mantle is denied by default. Add the explicit deny so it stays denied if the permission set is broadened later, for example with the AWS managed policy `AmazonBedrockFullAccess`, which allows `bedrock-mantle:*` (SCP-2 in the [multi-account guide](../MULTI_ACCOUNT.md#scp-2-deny-bedrock-mantle-org-wide-unmeterable-endpoint) denies Mantle organization-wide):
+
+```json
+{
+    "Sid": "DenyBedrockMantleEndpoint",
+    "Effect": "Deny",
+    "Action": "bedrock-mantle:*",
+    "Resource": "*"
+}
+```
+
 ## Migration from OIDC to IDC
 
 To switch an existing OIDC profile to IDC:

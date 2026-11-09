@@ -703,3 +703,125 @@ class TestAccrual:
         result = mod.lambda_handler({}, None)
         assert result["statusCode"] == 200
         mod.ddb_client.transact_write_items.assert_not_called()
+
+
+# ---------------------------------------------------------------------------
+# Wire format (regression, found live 2026-10-02) and OpenAI on bedrock-runtime
+# (ChatGPT Work / Codex, ADR-0037)
+# ---------------------------------------------------------------------------
+
+# Verbatim shape of the live record captured 2026-10-02 in eu-central-1
+# (docs/LIVE_VALIDATION.md LV-18); account and identity are placeholders.
+OPENAI_RESPONSES_RECORD = {
+    "timestamp": "2026-10-02T15:00:52Z",
+    "accountId": "123456789012",
+    "region": "eu-central-1",
+    "requestId": "7597e01a-c57f-48e5-a9e5-b62f52e64747",
+    "operation": "Responses",
+    "modelId": "arn:aws:bedrock:eu-central-1:123456789012:inference-profile/global.openai.gpt-6-sol",
+    "input": {
+        "inputContentType": "application/json",
+        "inputTokenCount": 2,
+        "cacheReadInputTokenCount": 0,
+        "cacheWriteInputTokenCount": 8176,
+    },
+    "output": {"outputContentType": "application/json", "outputTokenCount": 7},
+    "identity": {"arn": "arn:aws:sts::123456789012:assumed-role/BedrockOidcFederatedRole/user@example.com"},
+    "inferenceRegion": "us-east-1",
+    "schemaType": "ModelInvocationLog",
+    "schemaVersion": "1.0",
+}
+
+
+class TestTransactWireFormat:
+    """The accrual must reach DynamoDB as low-level AttributeValues.
+
+    Regression: ``ddb_client`` used to be ``dynamodb.meta.client``. A resource's
+    client re-serializes parameters with the high-level TypeSerializer during
+    ``before-parameter-build``, so ``{"N": "5"}`` was sent as
+    ``{"M": {"N": {"S": "5"}}}`` and every TransactWriteItems failed with
+    "operator: ADD, operand type: MAP". The test runs the module's real client
+    through that event chain (no network, no send path to patch).
+    """
+
+    def test_accrual_values_survive_parameter_build_unchanged(self, base_env):
+        import copy
+
+        from botocore.client import BaseClient
+
+        module = _load_processor(base_env)
+        assert isinstance(module.ddb_client, BaseClient)
+        assert module.ddb_client is not module.dynamodb.meta.client
+
+        items = [module.build_dedup_put("req-1")]
+        agg = {
+            "input_tokens": 100,
+            "output_tokens": 50,
+            "cache_read_tokens": 0,
+            "cache_write_tokens": 0,
+            "cost_usd": 0.5,
+        }
+        items.append(module.build_accrual_update("alice@example.com", agg, daily_reset=True))
+        params = {"TransactItems": copy.deepcopy(items)}
+
+        client = module.ddb_client
+        operation = client.meta.service_model.operation_model("TransactWriteItems")
+        client.meta.events.emit(
+            "before-parameter-build.dynamodb.TransactWriteItems", params=params, model=operation, context={}
+        )
+
+        assert params["TransactItems"] == items
+        values = params["TransactItems"][1]["Update"]["ExpressionAttributeValues"]
+        assert values[":inp"] == {"N": "100"}
+        assert values[":region"] == {"SS": [module.SOURCE_REGION]}
+
+
+class TestOpenAIRuntimeRecords:
+    def test_live_responses_record_parses_identity_tokens_and_cache(self, mod):
+        parsed = mod.parse_record(OPENAI_RESPONSES_RECORD)
+        assert parsed["identity"] == "user@example.com"
+        assert parsed["model_id"].endswith("inference-profile/global.openai.gpt-6-sol")
+        assert parsed["input_tokens"] == 2
+        assert parsed["output_tokens"] == 7
+        assert parsed["cache_read_tokens"] == 0
+        assert parsed["cache_write_tokens"] == 8176
+
+    def test_live_responses_record_accrues_global_sol_rates(self, mod):
+        mod.lambda_handler(_make_event([OPENAI_RESPONSES_RECORD]), None)
+
+        values = _update(_transact_calls(mod)[0])["ExpressionAttributeValues"]
+        # GPT-6 Sol Global CRIS: input $2.00, cache write $2.50, output $10.00 per 1M
+        expected = Decimal("2") * 2 / 10**6 + Decimal("8176") * Decimal("2.50") / 10**6 + Decimal("7") * 10 / 10**6
+        assert Decimal(values[":cost"]["N"]) == expected.quantize(Decimal("0.000001"))
+        assert values[":cwrite"] == {"N": "8176"}
+        key = _update(_transact_calls(mod)[0])["Key"]
+        assert key["pk"] == {"S": "USER#user@example.com"}
+
+    def test_us_geo_profile_uses_premium_rates(self, mod):
+        record = dict(OPENAI_RESPONSES_RECORD, modelId="us.openai.gpt-6-sol")
+        record["input"] = {"inputTokenCount": 100_000}
+        record["output"] = {"outputTokenCount": 1_000_000}
+        mod.lambda_handler(_make_event([record]), None)
+
+        values = _update(_transact_calls(mod)[0])["ExpressionAttributeValues"]
+        assert Decimal(values[":cost"]["N"]) == Decimal("11.22")  # 0.1M x $2.20 + 1M x $11.00
+
+    def test_long_context_request_bills_whole_request_at_long_rates(self, mod):
+        record = dict(OPENAI_RESPONSES_RECORD)
+        record["input"] = {"inputTokenCount": 200_000, "cacheReadInputTokenCount": 100_000}
+        record["output"] = {"outputTokenCount": 10_000}
+        mod.lambda_handler(_make_event([record]), None)
+
+        values = _update(_transact_calls(mod)[0])["ExpressionAttributeValues"]
+        # 300K input-side tokens > 272K: GPT-6 Sol Global long context $4.00 / $0.40 / $15.00
+        assert Decimal(values[":cost"]["N"]) == Decimal("0.99")  # 0.8 + 0.04 + 0.15
+
+    def test_unknown_openai_model_is_not_priced_as_claude(self, mod, capsys):
+        record = dict(OPENAI_RESPONSES_RECORD, modelId="global.openai.gpt-9-unreleased")
+        record["input"] = {"inputTokenCount": 100_000}
+        record["output"] = {"outputTokenCount": 1_000_000}
+        mod.lambda_handler(_make_event([record]), None)
+
+        values = _update(_transact_calls(mod)[0])["ExpressionAttributeValues"]
+        assert Decimal(values[":cost"]["N"]) == Decimal("56.1")  # GPT-6 Astra US Geo: 0.1M x $11 + 1M x $55
+        assert '"event": "unpriced_openai_model"' in capsys.readouterr().out

@@ -13,6 +13,9 @@ Changes on this fork relative to upstream `beta`.
 
 ### Changed
 
+- The Codex harness config no longer selects the `amazon-bedrock` (Mantle)
+  provider, which governed credentials deny (for IAM Identity Center, when the
+  permission set carries the deny).
 - **IAM: the Direct STS role's `MaxSessionDuration` follows the profile** in the
   six OIDC auth templates (`bedrock-auth-okta`, `-azure`, `-auth0`, `-google`,
   `-generic` and `-cognito-pool.yaml`). The new `MaxSessionDuration` parameter
@@ -120,6 +123,33 @@ Changes on this fork relative to upstream `beta`.
 
 ### Added
 
+- ChatGPT Work and Codex (desktop app, CLI, IDE extension) as governed
+  consumers through the `amazon-bedrock-runtime` provider (ADR-0037). New
+  auth-stack parameter `AllowOpenAIModels` (default `false`; profile and
+  answers-file field `allow_openai_models`) grants `bedrock:InvokeModel` on
+  OpenAI inference profiles, foundation models and the account's default
+  project. `DenyBedrockMantleEndpoint` is unchanged. `gip package --harnesses
+  codex` now writes a Bedrock Runtime config plus `codex.env` for the desktop
+  app. Budgets for these users need server-side metering in `max` mode. IAM
+  Identity Center users get their permissions from the permission set, so a
+  narrower permission set needs the two OpenAI statements, and every
+  permission set should carry `DenyBedrockMantleEndpoint` to keep Mantle denied
+  (`assets/docs/providers/iam-identity-center-setup.md`; not live-tested with
+  Identity Center).
+  Live-verified with Codex CLI 0.160.0 in `eu-central-1` on 2026-10-02
+  (LIVE_VALIDATION LV-18); the ChatGPT desktop app was not tested.
+- Optional admin `harnesses/codex/requirements.toml` for ChatGPT Work and
+  Codex: enforces `model_provider = "amazon-bedrock-runtime"`,
+  `allowed_login_methods = ["api"]`, `allowed_web_search_modes = []` and
+  `[features] in_app_updates = false`. Not installed automatically; the
+  enforcement was not live-tested.
+- Optional `oidc_scopes` for `provider_type: generic` (profile, answers file,
+  `config.json`, Go and Python credential providers). OneLogin rejects the
+  default `offline_access` scope on the authorization-code flow. Absent keeps
+  today's scopes. OneLogin notes added to the generic OIDC guide.
+- OpenAI pricing families in `shared/pricing.py` (GPT-6 Sol/Luna/Astra,
+  GPT-6.1 Sol, GPT-5.6 Sol/Terra/Luna; Global and US Geo; long context above
+  272K input tokens) from the Amazon Bedrock model cards.
 - **`gip deploy metering` can adopt an existing invocation-logging
   configuration.** The new profile field `metering_adopt_existing_config`
   (answers file `metering.adopt_existing_config`, default false) passes
@@ -428,6 +458,20 @@ The first nine entries were found in an end-to-end sidecar-mode test on
   which metering requires.
 - `gip deploy --show-commands` exits 1 when it can't build a stack's command,
   such as for an out-of-range `max_session_duration`, instead of exiting 0.
+- Server-side metering never accrued usage: the processor sent low-level
+  DynamoDB AttributeValues through a resource client, which re-serialized
+  them, so every `TransactWriteItems` failed (`operator: ADD, operand type:
+  MAP`) and batches went to the DLQ. Metering mode `max` therefore enforced
+  on client telemetry only. Redeploy the metering stacks. To recover
+  accruals still in the `MeteringProcessorDLQ` (14-day retention), invoke
+  the processor with each message body; deduplication makes this safe to
+  repeat, and the usage accrues to the month in which it is processed.
+- `gip deploy quota` failed for generic OIDC providers whose issuer has a
+  path (for example a Cognito user pool, a Keycloak realm or OneLogin's
+  `/oidc/2`): the quota JWT authorizer took `https://<domain>` as its issuer,
+  and API Gateway rejected it as an invalid issuer. `gip deploy quota` now
+  uses `oidc_issuer_url` for generic profiles, as the auth stack already did.
+  Profiles without it keep the previous value.
 
 ### Known limitations
 

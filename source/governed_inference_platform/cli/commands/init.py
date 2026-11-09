@@ -2623,6 +2623,14 @@ class InitCommand(Command):
                 config["aws"]["inference_profile_sonnet_arn"] = None
                 config["aws"]["inference_profile_haiku_arn"] = None
 
+            # ADR-0037: optionally admit OpenAI models on bedrock-runtime for
+            # ChatGPT Work / Codex. Mantle (bedrock-mantle) stays denied either way.
+            allow_openai = questionary.confirm(
+                "Admit OpenAI models on bedrock-runtime (ChatGPT Work / Codex)?",
+                default=bool(config.get("aws", {}).get("allow_openai_models", False)),
+            ).ask()
+            config["aws"]["allow_openai_models"] = bool(allow_openai)
+
             # Save progress
             progress.save_step("bedrock_complete", config)
 
@@ -2941,6 +2949,9 @@ class InitCommand(Command):
             if arn:
                 table.add_row(f"{tier} Inference Profile", arn)
 
+        if config["aws"].get("allow_openai_models"):
+            table.add_row("OpenAI models (bedrock-runtime)", "Admitted (ChatGPT Work / Codex; Mantle denied)")
+
         # Show cross-region profile
         cross_region_profile = config["aws"].get("cross_region_profile", "us")
         profile_display = {
@@ -3035,6 +3046,7 @@ class InitCommand(Command):
             web_search_enabled=config.get("web_search", {}).get("enabled", False),
             codebuild_region=codebuild_region,
             memory_enabled=config.get("memory", {}).get("enabled", False),
+            allow_openai_models=bool(config["aws"].get("allow_openai_models", False)),
         )
         if warnings:
             console.print("\n[bold yellow]\\[Data residency][/bold yellow]")
@@ -3105,6 +3117,7 @@ class InitCommand(Command):
             "inference_profile_opus_arn": config_data["aws"].get("inference_profile_opus_arn"),
             "inference_profile_sonnet_arn": config_data["aws"].get("inference_profile_sonnet_arn"),
             "inference_profile_haiku_arn": config_data["aws"].get("inference_profile_haiku_arn"),
+            "allow_openai_models": bool(config_data["aws"].get("allow_openai_models", False)),
             "provider_type": config_data.get("provider_type"),
             "cognito_user_pool_id": config_data.get("cognito_user_pool_id"),
             "oidc_issuer_url": config_data.get("oidc_issuer_url"),
@@ -3112,6 +3125,7 @@ class InitCommand(Command):
             "oidc_token_endpoint": config_data.get("oidc_token_endpoint"),
             "oidc_jwks_uri": config_data.get("oidc_jwks_uri"),
             "oidc_thumbprint": config_data.get("oidc_thumbprint"),
+            "oidc_scopes": config_data.get("oidc_scopes"),
             "federation_type": config_data.get("federation_type", "cognito"),
             "max_session_duration": config_data.get("max_session_duration", 28800),
             "session_name_binding": config_data.get("session_name_binding", "none"),
@@ -3499,6 +3513,7 @@ class InitCommand(Command):
                 "oidc_token_endpoint",
                 "oidc_jwks_uri",
                 "oidc_thumbprint",
+                "oidc_scopes",
             ):
                 if getattr(profile, oidc_field, None):
                     existing_config[oidc_field] = getattr(profile, oidc_field)
@@ -3524,6 +3539,9 @@ class InitCommand(Command):
             ]:
                 if getattr(profile, arn_key, None):
                     existing_config["aws"][arn_key] = getattr(profile, arn_key)
+
+            # ADR-0037: OpenAI-on-bedrock-runtime admission (round-trips with _save_configuration)
+            existing_config["aws"]["allow_openai_models"] = bool(getattr(profile, "allow_openai_models", False))
 
             # Add CodeBuild configuration if present
             if hasattr(profile, "enable_codebuild"):

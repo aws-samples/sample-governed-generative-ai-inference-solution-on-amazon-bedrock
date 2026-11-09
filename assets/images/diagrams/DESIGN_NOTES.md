@@ -73,7 +73,7 @@ after rendering with rsvg-convert 2.62.3.
 | 4, 5 | Fixed: "Amazon Cognito user pools"; "no long-lived AWS keys". |
 | 6 | Fixed: the memory-tools sub-caption reads "log-only: only org_knowledge_search runs". |
 | 7 | Fixed: the memory legend has no optional-module swatch, and both AWS-managed groups read "AWS-managed, outside your account". |
-| 8, 9 | Fixed: badge 6 sits at the Amazon Bedrock end, and the invoke edge has the sub-caption "all clients except Codex CLI". |
+| 8, 9 | Fixed: badge 6 sits at the Amazon Bedrock end, and the invoke edge has a sub-caption naming the clients it covers ("all clients except Codex CLI" at the time; "all clients" since ADR-0037 admitted ChatGPT Work and Codex on bedrock-runtime). |
 | 10, 11 | Fixed with the review's wording. Item 10 was reworded in a second pass so PutMetricData reads as allowed: "Allows (default): Anthropic models in allowed Regions; PutMetricData with monitoring. Denies bedrock-mantle:*". |
 | 12 | Fixed: the quota label clears the IdP box by 20 px, and the IdP caption moved beside its icon. |
 | 13, 15 | Fixed: "internals per its README"; "internal apps (any SDK host)"; "Sidecar: no Fargate, no analytics"; "Athena over S3 data lake". |

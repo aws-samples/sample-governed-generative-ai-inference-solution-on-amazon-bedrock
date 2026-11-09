@@ -63,6 +63,8 @@ SHARED_PARAMS = [
     "FederatedRoleName",
     "AllowedBedrockRegions",
     "RestrictToAnthropicModels",
+    # ADR-0037: opt-in OpenAI admission on bedrock-runtime; Default 'false' everywhere.
+    "AllowOpenAIModels",
     "EnableMonitoring",
     "SessionNameBinding",
     # Direct STS role ceiling; `gip deploy` sets it from the profile's max_session_duration.

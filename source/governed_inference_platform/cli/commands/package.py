@@ -1081,6 +1081,9 @@ class PackageCommand(Command):
             harness_dir.mkdir(parents=True, exist_ok=True)
             (harness_dir / cfg.filename).write_text(cfg.content, encoding="utf-8")
             console.print(f"  [green]✓[/green] harnesses/{cfg.harness}/{cfg.filename} ({cfg.display_name})")
+            for extra_name, extra_content in cfg.extra_files:
+                (harness_dir / extra_name).write_text(extra_content, encoding="utf-8")
+                console.print(f"  [green]✓[/green] harnesses/{cfg.harness}/{extra_name} ({cfg.display_name})")
 
         readme = build_harnesses_readme(configs, profile_name, aws_region, model_ids)
         (harness_root / "README.md").write_text(readme, encoding="utf-8")
@@ -3106,6 +3109,7 @@ RUN pyinstaller \
                 "oidc_token_endpoint",
                 "oidc_jwks_uri",
                 "oidc_thumbprint",
+                "oidc_scopes",
             ):
                 value = getattr(profile, field, None)
                 if value:

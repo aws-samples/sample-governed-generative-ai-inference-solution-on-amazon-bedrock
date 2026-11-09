@@ -144,6 +144,10 @@ class MultiProviderAuth:
                 f"Unknown provider type '{self.provider_type}'. Valid providers: {', '.join(PROVIDER_CONFIGS.keys())}"
             )
         self.provider_config = dict(PROVIDER_CONFIGS[self.provider_type])
+        # Generic OIDC: optional scope override (e.g. OneLogin, which rejects
+        # offline_access on the authorization-code flow). Mirrors oidc_scopes in the Go binary.
+        if self.provider_type == "generic" and (self.config.get("oidc_scopes") or "").strip():
+            self.provider_config["scopes"] = self.config["oidc_scopes"].strip()
 
         # For Okta, resolve the authorization server in endpoint paths.
         # "default" = Okta custom auth server (free/developer plans).

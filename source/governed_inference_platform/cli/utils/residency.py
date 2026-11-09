@@ -74,6 +74,7 @@ def residency_warnings(
     web_search_enabled: bool,
     codebuild_region: str | None = None,
     memory_enabled: bool = False,
+    allow_openai_models: bool = False,
 ) -> list[str]:
     """Warnings when supporting infrastructure leaves the inference geography.
 
@@ -112,6 +113,26 @@ def residency_warnings(
             "the region note in deployment/infrastructure/memory-stack.yaml and review compliance impact "
             "before enabling."
         )
+
+    if allow_openai_models and geography != "us":
+        # The OpenAI model cards list no eu/au/jp Geo profile on bedrock-runtime,
+        # so those source Regions get global.* (GPT-6 Sol card, retrieved
+        # 2026-10-02: eu-* source Regions list Global CRIS only). Some models
+        # list in.* and us-gov.* Geo profiles (GPT-5.6 Terra/Luna, 2026-11-08).
+        if geography == "us-gov":
+            warnings.append(
+                "OpenAI models (ChatGPT Work / Codex, AllowOpenAIModels): the default model (GPT-6 Sol) has "
+                "no AWS GovCloud inference profile on bedrock-runtime, so the generated Codex config leaves "
+                "`model` unset. Some models list a us-gov.openai.* Geo profile on their model card; confirm "
+                "availability before setting one."
+            )
+        else:
+            warnings.append(
+                f"OpenAI models (ChatGPT Work / Codex, AllowOpenAIModels) have no '{geography}' Geo "
+                "inference profile on bedrock-runtime: from this geography they run through Global "
+                "cross-Region inference (global.openai.*), which can route prompts to commercial AWS "
+                "Regions worldwide. Invocation logs and quota records stay in this deployment's regions."
+            )
 
     if codebuild_region:
         codebuild_geography = region_geography(codebuild_region)
