@@ -1,6 +1,6 @@
 # Cost Attribution for Amazon Bedrock
 
-This applies to the **direct IAM path** (`FederationType=direct`) only. The Cognito path handles cost attribution automatically.
+This applies to the **direct IAM path** (`FederationType=direct`) only. The Cognito path handles cost attribution automatically. For Claude Apps Gateway, see [APPS_GATEWAY.md](APPS_GATEWAY.md#aws-cost-attribution).
 
 ## Attribution flow and trust boundary
 
@@ -73,7 +73,7 @@ To set this up:
 
 If you need per-user **tag-based** cost allocation (beyond the session name in the ARN), you can embed session tags in the ID token.
 
-When `AssumeRoleWithWebIdentity` is called, STS reads the `https://aws.amazon.com/tags` claim from the ID token and attaches those tags to the resulting session. Once activated as **user-defined cost allocation tags** (not the "IAM principal type" filter), they appear in CUR 2.0 and Cost Explorer.
+When `AssumeRoleWithWebIdentity` is called, STS reads the `https://aws.amazon.com/tags` claim from the ID token and attaches those tags to the resulting session. Once activated as cost allocation tags, AWS documents them as IAM principal tags: in CUR 2.0's tags column with the `iamPrincipal/` prefix, and in Cost Explorer under the **IAM** category ([IAM principal cost allocation](https://docs.aws.amazon.com/awsaccountbilling/latest/aboutv2/iam-principal-cost-allocation.html), [launch post](https://aws.amazon.com/blogs/machine-learning/introducing-granular-cost-attribution-for-amazon-bedrock/)). This sample's live validation has not run that activation in a billing account ([LV-1](LIVE_VALIDATION.md#lv-1-aip-cost-allocation-tag-flow-into-cost-explorer-and-cur) is blocked).
 
 ### Trust policy requirement
 
@@ -176,9 +176,9 @@ Entra ID's custom claims provider does not support JSON object values (only `Str
 After at least one Bedrock API call has been made with session tags:
 
 1. Open **Billing and Cost Management console → Cost Allocation Tags**
-2. Filter for **user-defined** cost allocation tags (not "IAM principal type" — that is for section 2 role-level tags)
+2. Filter for **IAM principal type** tags; AWS says this covers an assumed-role session's tags ([IAM principal cost allocation](https://docs.aws.amazon.com/awsaccountbilling/latest/aboutv2/iam-principal-cost-allocation.html))
 3. Locate `UserEmail` and `UserId` and click **Activate** — tags take up to **24 hours to appear** after the first tagged API call, and a further **24 hours to activate**
-4. In Cost Explorer, group or filter by **Tag → `UserEmail`** to see per-user Bedrock spend
+4. In Cost Explorer, group or filter by **Tag**, **IAM** category, `UserEmail` to see per-user Bedrock spend ([launch post](https://aws.amazon.com/blogs/machine-learning/introducing-granular-cost-attribution-for-amazon-bedrock/))
 
 Once activated, session tags are available in both **Cost Explorer** and **CUR 2.0**. This means you can group or filter costs by tag in the Cost Explorer console without needing Athena, unlike the `line_item_iam_principal` column in section 1 which is only available in CUR 2.0.
 
@@ -218,7 +218,7 @@ For quantifying how much prompt caching reduces these costs (dashboard widgets, 
 
 ### IDC limitation
 
-IAM Identity Center central telemetry is aggregate-only. For per-user and organizational cost visibility in CUR 2.0, configure [ABAC attributes](https://docs.aws.amazon.com/singlesignon/latest/userguide/abac.html) in IAM Identity Center so session tags flow automatically.
+IAM Identity Center central telemetry is aggregate-only. For per-user and organizational **tag-based** cost visibility in CUR 2.0 (beyond the session name in the ARN), configure [ABAC attributes](https://docs.aws.amazon.com/singlesignon/latest/userguide/abac.html) in IAM Identity Center so session tags flow automatically.
 
 ---
 

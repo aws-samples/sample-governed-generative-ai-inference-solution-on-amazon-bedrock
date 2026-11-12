@@ -53,8 +53,8 @@ before you deploy it, and re-scan after every pin change.
 
 `scripts/sync-claude-apps-gateway.sh` proposes a new pin (it rewrites
 `UPSTREAM.json` and this directory's `LICENSE` copy only, and rejects a
-non-regular or symlinked upstream `LICENSE`). The weekly sync
-workflow materializes the proposed pin, runs the upstream tests and
+non-regular or symlinked upstream `LICENSE`). The sync workflow,
+which runs only when a maintainer starts it, materializes the proposed pin, runs the upstream tests and
 `npm audit`, and opens a review pull request that links the upstream diff; it
 never deploys or auto-merges upstream changes. Dependency fixes must come from
 upstream and arrive in a subsequent pinned sync.

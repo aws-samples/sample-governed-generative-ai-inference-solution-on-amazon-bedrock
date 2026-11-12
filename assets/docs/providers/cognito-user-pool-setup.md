@@ -2,6 +2,9 @@
 
 This guide explains how to set up an AWS Cognito User Pool for use with Claude Code authentication. The User Pool can be used standalone or integrated with external identity providers like Amazon Federate/Midway.
 
+> Using a Cognito user pool as the identity provider for Claude Apps Gateway
+> instead? See [Amazon Cognito as the gateway identity provider](../APPS_GATEWAY.md#amazon-cognito-as-the-gateway-identity-provider).
+
 ## Overview
 
 The CloudFormation template creates a Cognito User Pool with:

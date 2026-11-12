@@ -169,6 +169,63 @@ class TestIdentityExtraction:
 
 
 # ---------------------------------------------------------------------------
+# Claude apps gateway sessions (characterization, not a behaviour change)
+# ---------------------------------------------------------------------------
+
+GATEWAY_ROLE = "claude-gateway-bedrock-user"
+
+
+def _gateway_arn(session_name: str) -> str:
+    """ARN of a Bedrock call the gateway signs through its assume_role upstream."""
+    return f"arn:aws:sts::123456789012:assumed-role/{GATEWAY_ROLE}/{session_name}"
+
+
+class TestGatewaySessionAttribution:
+    """Pin what the processor does with the session names the Claude apps gateway sets.
+
+    Gateway contract (code.claude.com/docs/en/claude-apps-gateway-config,
+    "Bedrock in another AWS account" and "Per-developer AWS cost attribution"):
+    without ``session_name`` every request uses one session named
+    ``claude-apps-gateway``; with ``session_name: email|sub`` each developer gets a
+    session named after that claim, with characters outside ``[A-Za-z0-9_+,.@-]``
+    written as ``=XX`` per UTF-8 byte. The processor does not look at the calling
+    role, so these tests record which quota row each case reaches.
+    """
+
+    def test_email_session_maps_to_the_email(self, mod):
+        assert mod.extract_identity(_gateway_arn("alice@example.com")) == "alice@example.com"
+
+    def test_email_session_shares_the_direct_path_row(self, mod):
+        """A gateway call and a credential-process call for one email accrue to one item."""
+        event = _make_event(
+            [
+                _record(request_id="direct-1", input_tokens=100, output_tokens=10),
+                _record(
+                    request_id="gateway-1", arn=_gateway_arn("alice@example.com"), input_tokens=200, output_tokens=20
+                ),
+            ]
+        )
+        mod.lambda_handler(event, None)
+
+        calls = _transact_calls(mod)
+        assert len(calls) == 1
+        update = _update(calls[0])
+        assert update["Key"]["pk"] == {"S": "USER#alice@example.com"}
+        assert update["ExpressionAttributeValues"][":delta"] == {"N": "330"}
+
+    def test_default_shared_session_is_unattributed(self, mod):
+        assert mod.extract_identity(_gateway_arn("claude-apps-gateway")) == f"UNATTRIBUTED#{GATEWAY_ROLE}"
+
+    def test_encoded_email_session_keeps_the_encoded_form(self, mod):
+        """o'brien@example.com reaches AWS as o=27brien@example.com and is not decoded."""
+        assert mod.extract_identity(_gateway_arn("o=27brien@example.com")) == "o=27brien@example.com"
+
+    def test_sub_session_is_unattributed(self, mod):
+        sub = "8f14e45f-ceea-467f-a0e6-0d4e1f2a3b4c"
+        assert mod.extract_identity(_gateway_arn(sub)) == f"UNATTRIBUTED#{GATEWAY_ROLE}"
+
+
+# ---------------------------------------------------------------------------
 # Token extraction, including defensively captured cache fields
 # ---------------------------------------------------------------------------
 

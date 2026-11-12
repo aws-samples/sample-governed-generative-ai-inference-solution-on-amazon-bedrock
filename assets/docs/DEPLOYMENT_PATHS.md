@@ -11,8 +11,8 @@ path's guide.
 > **Deploying Claude Code / Claude Desktop only?** Start with **Path 4 (Claude
 > apps gateway)** — Anthropic's first-party control plane, recommended for
 > Claude apps on Bedrock. Paths 1–3 deploy the credential-process
-> architecture; choose them when you need IAM Identity Center, per-user
-> CloudTrail/CUR attribution, or non-Claude harnesses.
+> architecture; choose them when you need IAM Identity Center or non-Claude
+> harnesses.
 
 | # | Path | Best for | Admin skill assumed | Time to first token |
 |---|------|----------|--------------------|---------------------|
@@ -171,7 +171,8 @@ telemetry, and Desktop `/user/bootstrap` contracts. Use its companion
 `claude-apps-gateway-bootstrap` CDK only when a separate PKCE
 configuration/MCP overlay is required. `gip deploy gateway/bootstrap` is
 retired rather than adapting incompatible CloudFormation parameters. Trade-offs
-versus credential-process paths are tabled in [APPS_GATEWAY.md](APPS_GATEWAY.md).
+versus credential-process paths are tabled in
+[APPS_GATEWAY.md](APPS_GATEWAY.md#gateway-or-credential-process).
 
 ## Path 5 — Agent-assisted deployment
 

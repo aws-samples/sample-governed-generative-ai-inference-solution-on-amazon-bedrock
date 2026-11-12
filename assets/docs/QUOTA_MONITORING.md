@@ -86,7 +86,7 @@ The two usage records are deliberately independent: client telemetry comes throu
 
 `shadow` observes drift without changing enforcement; `max` evaluates the higher client or server figure. Neither mode repairs untrusted identity labels or processor records that fail to accrue. There is no `strict` mode. `bedrock-mantle` is denied to governed credentials (for IAM Identity Center, when the permission set carries the deny) because it does not produce the invocation logs required by this flow.
 
-This decision applies to the **credential-process/direct IAM path** at credential issuance and periodic re-check, not inline to every Bedrock request. Claude Apps Gateway applies its own inline spend controls; gateway and direct-path budgets are separate and are not a unified hard cap.
+This decision applies to the **credential-process/direct IAM path** at credential issuance and periodic re-check, not inline to every Bedrock request. Claude Apps Gateway applies its own inline spend controls from its own PostgreSQL store, not from this sample's quota tables, so the two are not a unified hard cap. Server-side metering can still add gateway traffic to a user's quota row: see [Traffic through Claude Apps Gateway](#traffic-through-claude-apps-gateway).
 
 ## Configuration
 
@@ -911,8 +911,10 @@ back to the user.
 Claude Apps Gateway deployments use the upstream gateway's own per-request
 spend controls and telemetry contract. See the exact pinned source under
 `vendor/aws-samples/anthropic-on-aws/` (materialize it with
-`scripts/fetch-claude-apps-gateway.sh`); GIP does not merge that data into its
-credential-process quota tables.
+`scripts/fetch-claude-apps-gateway.sh`); GIP does not read the gateway's spend
+or telemetry data. Server-side metering reads Bedrock invocation logs instead,
+so gateway calls can reach the quota tables; see
+[Traffic through Claude Apps Gateway](#traffic-through-claude-apps-gateway).
 
 ## Data Latency
 
@@ -1090,6 +1092,76 @@ cache write (7,613 tokens), cache read (7,613 tokens), input, and output.
 - `SessionNameBinding` is not required to operate `shadow` or `max`, but without
   it those modes must not be described as tamper-resistant **per-user**
   enforcement. Binding remains a prerequisite for any future strict mode.
+
+### Traffic through Claude Apps Gateway
+
+Bedrock model invocation logging is a per-account, per-Region configuration,
+and the processor reads every record in the log group it subscribes to. It does
+not filter on the calling role: `extract_identity()` in
+`metering_processor/index.py` keys a record by the assumed-role session name in
+`identity.arn`. Bedrock calls that the gateway signs in an account and Region
+where this stack runs are therefore metered like any other call, and the quota
+row they reach depends on the session name the gateway sets (gateway
+[configuration reference](https://code.claude.com/docs/en/claude-apps-gateway-config#per-developer-aws-cost-attribution)):
+
+| Gateway Bedrock upstream | Session name AWS records | Quota row the processor writes |
+| --- | --- | --- |
+| No `assume_role` | The gateway role's own session | `USER#UNATTRIBUTED#<role>`, unless that session name contains `@` |
+| `assume_role` without `session_name` | `claude-apps-gateway`, one session for every developer | `USER#UNATTRIBUTED#<role>` |
+| `assume_role` with `session_name: email` | The developer's email | `USER#<email>`, the row that the same email's credential-process usage reaches |
+| `session_name: email`, email with a character outside letters, digits and `_+,.@-` | The email with each such character written as `=XX` | A row keyed by the encoded name, which the quota API doesn't read for that user |
+| `assume_role` with `session_name: sub` | The IdP `sub` | `USER#UNATTRIBUTED#<role>` unless the `sub` contains `@` |
+
+The gateway signs the one-token fallback request for an abandoned request with
+the shared `claude-apps-gateway` session even when `session_name` is set, so
+that call reaches `USER#UNATTRIBUTED#<role>`. The gateway shortens a session
+name longer than 64 characters to a prefix plus a hash; which row such a name
+reaches has not been checked. `TestGatewaySessionAttribution` in
+`source/tests/test_metering_processor.py` covers the processor's session-name
+to row mapping for the email, shared-session, encoded-email and `sub` cases.
+It does not cover the first row of the table, the quota API side of the
+encoded-email row, or the 64-character case.
+
+What that means in each mode:
+
+- **`shadow`:** enforcement doesn't change. Gateway usage under
+  `session_name: email` adds to that user's `server_*` token figures, and to
+  `server_estimated_cost` except for calls through an application inference
+  profile ARN, which are priced at 0 (see `max` below).
+- **`max`:** `quota_check` takes `max(client, server)` separately for tokens
+  and for cost, so that user's gateway usage counts toward their
+  credential-process token budget and can block credential issuance on the
+  direct path. For a cost budget, calls through an application inference
+  profile ARN (the gateway's per-team route) don't count: the processor prices
+  that `modelId` at 0 (`unpriced_aip` in `shared/pricing.py`), adds their
+  tokens but nothing to `server_estimated_cost`, and logs a warning. `max`
+  mode has no effect on the gateway, which enforces its own caps.
+- **Drift, in either mode:** `quota_monitor` reconciles whenever `server_*`
+  attributes exist, whatever the metering mode. It computes each user's
+  month-to-date drift as `(client - server) / max(server, 1)` from the token
+  totals and publishes it as `MeteringDrift`, and it raises a `metering_drift`
+  alert when the absolute drift exceeds `DRIFT_ALERT_PERCENT` and the server
+  total exceeds `DRIFT_MIN_SERVER_TOKENS` (`quota_monitor/index.py`). Usage
+  that adds to the server total and not to the client total moves drift
+  toward negative values. This sample does not read the gateway's telemetry
+  ([CoWork 3P Usage Counting](#cowork-3p-usage-counting)), and whether a
+  gateway client's telemetry can reach this sample's client figures has not
+  been checked.
+- **Unattributed rows** get the drift metric and never an alert, as for
+  Cognito federation above.
+
+Each metering stack reads the invocation logs of its own account and Region.
+Within one account, `gip deploy metering` deploys a stack in every Region
+listed in the profile's `allowed_bedrock_regions`, each writing to the quota
+table in the profile's Region (`QuotaTableRegion`), so gateway calls in any of
+those Regions reach the same quota table and the rows listed above. A profile with no
+`allowed_bedrock_regions` is metered in its primary Region only. Gateway calls
+in a Region with no metering stack are not metered. Calls signed in another
+account, including through an `assume_role` target role there, are not metered
+by this account's stacks; a metering stack deployed in that account writes
+only to a quota table in its own account (`MeteringProcessorPolicy` in
+`quota-metering.yaml`). A live end-to-end check is open:
+[LV-19](LIVE_VALIDATION.md#lv-19-claude-apps-gateway-traffic-in-server-side-metering).
 
 ### ChatGPT Work and Codex (OpenAI models on bedrock-runtime)
 
