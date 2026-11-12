@@ -2,7 +2,7 @@
 
 Complete deployment walkthrough for IT administrators standing up the Governed Inference Platform on Amazon Bedrock **using the interactive wizard** (the credential-process path). One deployment powers internal products built on the AWS SDK, Claude Desktop (Cowork), and the CLI coding harnesses your developers choose — with SSO, budgets, attribution, and model governance enforced below the app layer.
 
-> **Deploying Claude Code or Claude Desktop only?** The [Claude apps gateway](assets/docs/APPS_GATEWAY.md) is the recommended path — use the exact AWS Samples CDK pinned in `vendor/aws-samples/anthropic-on-aws/UPSTREAM.json` (run `scripts/fetch-claude-apps-gateway.sh` to materialize it). Use this wizard walkthrough when you need IAM Identity Center, per-user CloudTrail/CUR attribution, internal AWS SDK apps, or other harnesses (OpenCode, Codex CLI, Pi, Aider).
+> **Deploying Claude Code or Claude Desktop only?** The [Claude apps gateway](assets/docs/APPS_GATEWAY.md) is the recommended path — use the exact AWS Samples CDK pinned in `vendor/aws-samples/anthropic-on-aws/UPSTREAM.json` (run `scripts/fetch-claude-apps-gateway.sh` to materialize it). Use this wizard walkthrough when you need IAM Identity Center, internal AWS SDK apps, or other harnesses (OpenCode, Codex CLI, Pi, Aider).
 > For GitOps/answers-file, fully by-hand CloudFormation console, or agent-assisted deployment, see [Choosing a Deployment Path](assets/docs/DEPLOYMENT_PATHS.md).
 
 **Time Required:** 2-3 hours for initial deployment

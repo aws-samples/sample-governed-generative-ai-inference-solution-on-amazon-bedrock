@@ -51,6 +51,22 @@ one account"). The deciding dimensions (`APPS_GATEWAY.md:18-31`):
   `APPS_GATEWAY.md:193-197`).
 - The gateway's inline spend caps become the offering for customers who want
   per-request enforcement — see ADR-0009.
+- **Status update (2026-11-11):** the attribution row above no longer holds
+  for the gateway. A Bedrock upstream that sets `assume_role` with
+  `session_name: email|sub` (gateway on Claude Code v2.1.281 or later) gives
+  each developer their own assumed-role session, which CUR 2.0 can show in
+  `line_item_iam_principal`; without it, the gateway still signs with one
+  principal. On the credential-process side the session name carries the
+  user with Direct STS federation and IAM Identity Center; with Cognito
+  Identity Pool, Cognito sets the session name and the `UserEmail` and
+  `UserId` session tags carry the user
+  ([APPS_GATEWAY.md](../APPS_GATEWAY.md#credential-process-by-federation-mode)).
+  IAM Identity Center and non-Claude clients remain reasons to choose
+  credential-process, and the CI row still holds for the gateway: it has no
+  service-token flow for unattended pipelines
+  ([gateway overview](https://code.claude.com/docs/en/claude-apps-gateway#ci-pipelines-and-remote-machines)).
+  The decision table this ADR called for is in
+  [APPS_GATEWAY.md](../APPS_GATEWAY.md#gateway-or-credential-process).
 
 ## Evidence
 

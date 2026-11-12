@@ -48,6 +48,9 @@ usage counts toward the same per-user quota
   time only (see ADR-0009) until metering `max` mode lands.
 - Extending harness-specific docs/config generation is queued as its own lane
   (branch `feat/ws-h2-multi-harness`, branched at `650d3d7`).
+- **Status update (2026-11-11):** per-user CUR 2.0 attribution is no longer
+  something the gateway loses outright: see the status update in ADR-0003.
+  The gateway still serves only Claude clients, so the decision stands.
 
 ## Evidence
 

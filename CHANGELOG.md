@@ -13,6 +13,10 @@ Changes on this fork relative to upstream `beta`.
 
 ### Changed
 
+- The Claude Apps Gateway pin in `vendor/aws-samples/anthropic-on-aws/UPSTREAM.json`
+  moves to `aws-samples/anthropic-on-aws` commit `7163e8f` (2026-11-10). The deploy
+  steps in `APPS_GATEWAY.md` now say to stage the Linux `claude` binary before
+  `deploy.sh`, which the upstream script checks for at this commit.
 - The Codex harness config no longer selects the `amazon-bedrock` (Mantle)
   provider, which governed credentials deny (for IAM Identity Center, when the
   permission set carries the deny).
@@ -56,8 +60,8 @@ Changes on this fork relative to upstream `beta`.
   the exact `aws-samples/anthropic-on-aws` commit pinned in `UPSTREAM.json`.
   The upstream subtrees are not committed; the fetch reconstructs and checks
   their Git tree identities (paths, types, executable modes, symlink targets,
-  and bytes). A weekly workflow tests pin updates and opens a review PR without
-  auto-merging or deploying. Legacy profile fields and destroy commands remain
+  and bytes). An on-demand workflow, which a maintainer starts, tests pin updates and opens
+  a review PR without auto-merging or deploying. Legacy profile fields and destroy commands remain
   only for migration and cleanup of previously deployed GIP stacks.
 - Live validation on 2026-08-14 confirmed all 14 stacks deploy/update in a
   fresh Cognito OIDC sandbox in `us-east-1`; `gip test` passed all six checks,
@@ -481,6 +485,46 @@ The first nine entries were found in an end-to-end sidecar-mode test on
 
 ### Documentation
 
+- `APPS_GATEWAY.md` covers Amazon Cognito as the gateway's identity provider:
+  `oidc.groups_claim` for Cognito's `cognito:groups` claim, the
+  `scopes: [openid, email, profile]` override that the upstream sample
+  documents, the gateway's rejection of an id_token whose `email_verified` is
+  `false`, the app client's read access to `email_verified`, Cognito's
+  documented refresh-token behavior, and how the AWS page and the upstream
+  sample differ on what requesting `offline_access` does. This sample's live
+  validation has not run Cognito as the gateway's identity provider. The
+  Cognito user pool guide links to it.
+- `APPS_GATEWAY.md` now has the decision table that the README and
+  DEPLOYMENT_PATHS point to, comparing Claude Apps Gateway and credential-process
+  on clients, when a spend block takes effect, limit scopes (neither has a
+  per-model limit), store-outage behavior, AWS cost attribution in CUR 2.0 and
+  Cost Explorer, the spend figure, identity providers, what you operate and
+  support status. A new AWS cost attribution section covers per-developer
+  sessions through the gateway's `assume_role` with `session_name` (gateway on
+  Claude Code v2.1.281 or later) and per-team application inference profiles,
+  and a table of how credential-process attributes cost per user in each
+  federation mode (Direct STS, Cognito Identity Pool, IAM Identity Center),
+  none of it observed in billing data by this sample's live validation. COST_ATTRIBUTION's IAM
+  Identity Center note now says ABAC attributes are for tag-based visibility,
+  and its section 3 now says session tags are activated as IAM principal tags
+  and appear with the `iamPrincipal/` prefix in CUR 2.0, as AWS documents.
+  The README, QUICK_START, DEPLOYMENT_PATHS and ADR-0003/0007 no longer say
+  that per-user CUR attribution requires credential-process.
+- QUOTA_MONITORING states what server-side metering does with Claude Apps
+  Gateway traffic. The processor does not filter on the calling role, so a
+  gateway Bedrock upstream with `assume_role` and `session_name: email`, in an
+  account and Region where the metering stack runs, adds that developer's
+  gateway usage to their quota row, and `max` mode then counts it toward their
+  credential-process token budget. It also counts toward a cost budget, except
+  for calls through an application inference profile ARN, which the processor
+  prices at 0. The shared `claude-apps-gateway` session and `sub` session names
+  go to the unattributed bucket. New tests in `test_metering_processor.py`
+  cover the processor's session-name to row mapping without changing metering
+  behavior, and LIVE_VALIDATION adds LV-19 for the live check.
+- The Claude Apps Gateway sync workflow (`sync-claude-apps-gateway.yml`) is
+  described as on demand, which it is: a maintainer starts it. `APPS_GATEWAY.md`,
+  the vendor README, LIVE_VALIDATION and ADR-0035/0036 no longer call it weekly
+  or scheduled, and `APPS_GATEWAY.md` shows how to start it.
 - RUNBOOKS offboarding: IdP deactivation stops sign-ins and refreshes, but a
   cached, unexpired ID token can still be exchanged for credentials, so the
   per-user deny stays in place for that window too; a lowered
@@ -621,7 +665,7 @@ The first nine entries were found in an end-to-end sidecar-mode test on
   (`--verify`, `--clean`, `--print-tree-id`). Unsupported filesystem types are
   rejected, and verification uses only isolated temporary Git state.
   `scripts/sync-claude-apps-gateway.sh` now only proposes a pin (rewrites
-  `UPSTREAM.json` and the `LICENSE` copy); the weekly workflow tests the
+  `UPSTREAM.json` and the `LICENSE` copy); the on-demand sync workflow tests the
   materialized pin and opens a PR that changes the pin only and links the
   upstream diff. **Operator change:** run `scripts/fetch-claude-apps-gateway.sh`
   before `cd vendor/aws-samples/anthropic-on-aws/claude-apps-gateway` (needs

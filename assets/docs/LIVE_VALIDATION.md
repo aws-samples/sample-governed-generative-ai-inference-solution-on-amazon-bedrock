@@ -51,6 +51,7 @@ exercise), [QUOTA_MONITORING.md](QUOTA_MONITORING.md),
 | [LV-16](#lv-16-web-search-and-memory-outside-us-east-1) | Web Search / Memory deployment outside us-east-1 | Regional availability docs are stale in either direction | **verified, web search rejected in us-west-2** | 2026-08-14 |
 | [LV-17](#lv-17-validation-fixture-sweep) | Validation-fixture sweep (terminal) | Orphaned fixtures keep billing and pollute the account | **blocked by EC2 Mac 24-hour floor** | 2026-08-15 |
 | [LV-18](#lv-18-chatgpt-work-and-codex-on-bedrock-runtime) | ChatGPT Work / Codex on bedrock-runtime: governed inference, Mantle deny, metering, budget block | The ChatGPT Work path is unmetered, unblockable, or simply broken | **verified (Codex CLI 0.160.0 and 0.167.0, eu-central-1); desktop app not tested** | 2026-11-08 |
+| [LV-19](#lv-19-claude-apps-gateway-traffic-in-server-side-metering) | Claude Apps Gateway traffic in server-side metering | Gateway usage reaches a different quota row than documented, so `max` mode blocks the wrong user or none | **open, not run** | n/a |
 
 When an item passes, update its Status to `verified`, fill Last verified, and
 make the doc edits listed in that item's **On pass** row.
@@ -767,8 +768,8 @@ checked with versioned `git-tree-sha1-v1` verification by
 `scripts/fetch-claude-apps-gateway.sh`, which fails closed on any path, type,
 executable-mode, symlink-target, or byte mismatch
 ([ADR-0036](adr/0036-verified-fetch-claude-apps-gateway.md)).
-A scheduled workflow proposes pin bumps, runs upstream tests against the
-materialized pin, and opens a review PR. It never auto-deploys or auto-merges changes.
+An on-demand workflow, which a maintainer starts, proposes pin bumps, runs
+upstream tests against the materialized pin, and opens a review PR. It never auto-deploys or auto-merges changes.
 
 There is therefore no independent GIP response shape to validate against a
 real Desktop client. A customer deployment should still smoke-test its own IdP,
@@ -1007,6 +1008,32 @@ and priced metering, and the budget block all hold (steps 1-4 of the 2026-10-02
 run, steps 1-5 of the 2026-11-08 run). **FAIL:** any governed OpenAI call is denied, Mantle
 is reachable, a record is unattributed or unpriced, or an over-budget user
 receives credentials.
+
+---
+
+## LV-19: Claude Apps Gateway traffic in server-side metering
+
+| | |
+|---|---|
+| **Claim** | In an account and Region where `quota-metering.yaml` runs, Bedrock calls that the gateway signs through an `assume_role` upstream with `session_name: email` accrue `server_*` figures to `USER#<email>`, the row the quota API reads for that developer; with `session_name` unset or set to `sub`, they accrue to `USER#UNATTRIBUTED#<role>` ([QUOTA_MONITORING.md](QUOTA_MONITORING.md#traffic-through-claude-apps-gateway)). This rests on the processor code and unit tests only. |
+| **Applies to** | Claude Apps Gateway deployments that share an account and Region with a metering stack. |
+| **Preconditions** | Quota and metering stacks; the pinned upstream gateway deployed with a Bedrock upstream that sets `assume_role`; one test developer who also has a credential-process profile. |
+| **Cost** | Not measured: a few short inference calls, plus the gateway stack for the length of the test. |
+
+1. With `session_name: email`, send one prompt through the gateway as the test
+   developer. Read that developer's `USER#<email>` / `MONTH#<yyyy-mm>` item and
+   confirm `server_total_tokens` grew by the call's invocation-log token count.
+2. Repeat with `session_name` unset, then with `session_name: sub`. Confirm the
+   tokens land in `USER#UNATTRIBUTED#<role>` and the developer's row does not
+   change.
+3. In `max` mode, with a block-mode limit below the developer's metered gateway
+   usage, confirm credential-process refuses that developer's credentials.
+
+**PASS:** each step matches the claim. **FAIL:** gateway tokens reach a row the
+claim doesn't name, or step 3 issues credentials.
+
+**On pass:** record the date in this table and in the Traffic through Claude
+Apps Gateway section of QUOTA_MONITORING.md.
 
 ---
 

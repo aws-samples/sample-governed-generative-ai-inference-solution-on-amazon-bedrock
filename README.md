@@ -46,7 +46,7 @@ This generates MDM configuration files (JSON, macOS .mobileconfig, Windows .reg,
 Two connection modes:
 
 - **Claude apps gateway (recommended):** Anthropic's first-party control plane — nothing to install on developer machines beyond Claude Code itself. Details in [the gateway section](#claude-apps-gateway-recommended-for-claude-apps).
-- **credential-process:** developers sign in with SSO; the binary vends temporary AWS credentials to the AWS SDK and quota-gates issuance when a quota endpoint is configured. Choose it when you need full per-user CloudTrail/CUR attribution or IAM Identity Center. Packaged and distributed via `gip package` / `gip distribute`.
+- **credential-process:** developers sign in with SSO; the binary vends temporary AWS credentials to the AWS SDK and quota-gates issuance when a quota endpoint is configured. Choose it when you need IAM Identity Center or clients other than Claude Code and Claude Desktop. Packaged and distributed via `gip package` / `gip distribute`.
 
 ### Other CLI harnesses: ChatGPT Work and Codex, OpenCode, Pi, Aider
 
@@ -77,7 +77,7 @@ See the [Harnesses Guide](assets/docs/HARNESSES.md) for per-harness setup and an
 ### Consumer integrations
 
 - **Any Harness, One Plug**: The same credential-process powers [ChatGPT Work and Codex, OpenCode, Pi, and Aider](assets/docs/HARNESSES.md) — SSO, quotas, and attribution apply below the harness layer
-- **Two Architectures**: The [Claude apps gateway](assets/docs/APPS_GATEWAY.md) central control plane (recommended for Claude Code and Claude Desktop) or per-developer STS federation (for other harnesses, IAM Identity Center, and per-user AWS-native audit) — deployable side by side
+- **Two Architectures**: The [Claude apps gateway](assets/docs/APPS_GATEWAY.md) central control plane (recommended for Claude Code and Claude Desktop) or per-developer STS federation (for other harnesses and IAM Identity Center) — deployable side by side
 - **Platform Tools over MCP** (optional): [Web search](assets/docs/WEB_SEARCH.md) grounded in Amazon's web index and log-only [memory](assets/docs/MEMORY.md) behind one [AgentCore Gateway endpoint](assets/docs/MCP_GATEWAY.md) — wired into Claude Code, Claude Desktop, OpenCode, and Codex CLI; group entitlement and identity-dependent memory activation are rejected pending redesign
 - **Skills Registry** (optional): Governed publish → approve → distribute lifecycle for [agent skills](assets/docs/SKILLS_REGISTRY.md) — immutable content-addressed artifacts, IAM-separated publisher/curator roles, delivered to Claude Code, OpenCode, Codex CLI, and AgentCore harnesses
 - **One Deployment, Two Surfaces**: Same infrastructure powers both Claude Code CLI and Claude Desktop (which features Chat, Cowork and Code)
@@ -164,11 +164,11 @@ For new deployments of Claude apps on Amazon Bedrock, Anthropic's [Claude apps g
 - OTLP telemetry routing
 - Single stateless container deployment
 
-**👉 [Get started with Claude Apps Gateway on AWS](https://github.com/aws-samples/anthropic-on-aws/tree/main/claude-apps-gateway)** — this repository pins that subtree to an exact upstream commit in `vendor/aws-samples/anthropic-on-aws/UPSTREAM.json`; `scripts/fetch-claude-apps-gateway.sh` materializes it unchanged under `vendor/aws-samples/anthropic-on-aws/claude-apps-gateway` and verifies the resulting Git tree id (paths, types, executable modes, symlink targets, and bytes), while pin bumps arrive through tested review PRs. [`gip deploy gateway`](assets/docs/APPS_GATEWAY.md) is retired rather than wrapping or modifying the upstream CDK.
+**👉 [Get started with Claude Apps Gateway on AWS](https://github.com/aws-samples/anthropic-on-aws/tree/main/claude-apps-gateway)** — this repository pins that subtree to an exact upstream commit in `vendor/aws-samples/anthropic-on-aws/UPSTREAM.json`; `scripts/fetch-claude-apps-gateway.sh` materializes it unchanged under `vendor/aws-samples/anthropic-on-aws/claude-apps-gateway` and verifies the resulting Git tree id (paths, types, executable modes, symlink targets, and bytes), and pull requests that change the pin are checked by the `check-claude-apps-gateway-mirror.yml` workflow. [`gip deploy gateway`](assets/docs/APPS_GATEWAY.md) is retired rather than wrapping or modifying the upstream CDK.
 
 **💻 [Need a separate Claude Desktop configuration/MCP overlay? Add the Bootstrap companion](https://github.com/aws-samples/anthropic-on-aws/tree/main/claude-apps-gateway-bootstrap)** — it attaches to the same gateway and delivers its upstream PKCE configuration contract.
 
-Choose the credential-process architecture instead when you need per-user CloudTrail/CUR attribution, IAM Identity Center, or non-Claude consumers (internal AWS SDK apps, ChatGPT Work and Codex, OpenCode, Pi, Aider). The two can coexist in one account. See the [Apps Gateway guide](assets/docs/APPS_GATEWAY.md) for a full decision table and deployment steps.
+Choose the credential-process architecture instead when you need IAM Identity Center or non-Claude consumers (internal AWS SDK apps, ChatGPT Work and Codex, OpenCode, Pi, Aider). Both architectures can put each developer's session name in CUR 2.0's `line_item_iam_principal`: credential-process with Direct STS federation or IAM Identity Center, while Cognito Identity Pool mode carries the user in session tags instead ([by federation mode](assets/docs/APPS_GATEWAY.md#credential-process-by-federation-mode)), and the gateway only when its Bedrock upstream sets `assume_role` with `session_name` ([AWS cost attribution](assets/docs/APPS_GATEWAY.md#aws-cost-attribution)). This sample's live validation has not observed either in a CUR 2.0 export. The two can coexist in one account. See the [Apps Gateway guide](assets/docs/APPS_GATEWAY.md#gateway-or-credential-process) for a full decision table and deployment steps.
 
 <details>
 <summary><strong>Areas where this platform complements Claude Apps Gateway today</strong></summary>
@@ -178,7 +178,6 @@ The following capabilities are not yet available in Claude Apps Gateway but may 
 - **AWS IAM Identity Center** — native IDC authentication without external OIDC
 - **Historical usage analytics** — S3 + Athena for long-term usage queries
 - **Multi-platform packaging** — automated installers for Windows, macOS, Linux (note: Claude Apps Gateway is native to Claude Code and requires no additional client-side packages)
-- **Cost tracking via IAM principal-based cost allocation** — Gateway spend controls are based on cost estimates
 
 As Claude Apps Gateway evolves, check Anthropic's documentation for the latest capabilities.
 
@@ -201,8 +200,8 @@ upstream identity, telemetry, and spend-control model.
 
 | Auth Mode | Identity Source | Telemetry Attribution | Quota Enforcement | CUR 2.0 Cost Visibility |
 |-----------|----------------|----------------------|-------------------|-------------------------|
-| **OIDC** | JWT email claim | Per-user (email, team, department) | ✅ | ✅ Per-user via the STS session name (`line_item_iam_principal`); session tags optional (IdP-supplied) |
-| **IAM Identity Center** | IAM ARN session name | Per-user (email only) | ✅ | ✅ Per-user if [ABAC attributes](https://docs.aws.amazon.com/singlesignon/latest/userguide/abac.html) configured in IDC |
+| **OIDC** | JWT email claim | Per-user (email, team, department) | ✅ | ✅ Per-user via the STS session name (`line_item_iam_principal`) with Direct STS, or via session tags with Cognito Identity Pool; not observed by this sample's live validation ([by federation mode](assets/docs/APPS_GATEWAY.md#credential-process-by-federation-mode)) |
+| **IAM Identity Center** | IAM ARN session name | Per-user (email only) | ✅ | ✅ Per-user via the IAM Identity Center session name (`line_item_iam_principal`); tag-based views need [ABAC attributes](https://docs.aws.amazon.com/singlesignon/latest/userguide/abac.html); not observed by this sample's live validation ([by federation mode](assets/docs/APPS_GATEWAY.md#credential-process-by-federation-mode)) |
 | **None** | Hashed IAM principal | Anonymous | ❌ | ✅ Per-IAM-role |
 
 The same credential-issuance quota decision applies when Claude Code or Desktop
@@ -261,11 +260,11 @@ flowchart LR
 |---------|------------------|-----|----------------|
 | **Claude Code (CLI)** | otel-helper (header mode) | Returns identity headers (refreshed every 29 minutes by default) | Central or Sidecar |
 | **Claude Desktop (static GIP MDM)** | `otlpHeaders` in MDM config | Aggregate/device-level only | Central or Sidecar |
-| **Claude Desktop (Apps Gateway)** | Exact upstream gateway/Desktop contract | Upstream-owned; not merged into GIP quota state | Follow upstream |
+| **Claude Desktop (Apps Gateway)** | Exact upstream gateway/Desktop contract | Upstream-owned; gateway telemetry is not merged into GIP quota state | Follow upstream |
 
 > **Recommended for Claude apps:** use the exact pinned Claude Apps Gateway and its native Desktop contract. Do not translate gateway telemetry into GIP-specific bootstrap headers.
 
-**Cost attribution:** Amazon Bedrock supports [IAM principal cost tracking via CUR 2.0](assets/docs/COST_ATTRIBUTION.md) — per-user costs appear in CUR 2.0 (`line_item_iam_principal`, from the STS session name credential-process sets) once caller-identity data is enabled in the export; per-user Cost Explorer views also require IdP-supplied session tags. Note: real-time quota enforcement relies on telemetry emitted from the client rather than actual costs metered by AWS, so figures may differ from CUR.
+**Cost attribution:** Amazon Bedrock supports [IAM principal cost tracking via CUR 2.0](assets/docs/COST_ATTRIBUTION.md) — per-user costs appear in CUR 2.0 once caller-identity data is enabled in the export, from the session name or session tags depending on the federation mode, and per-user Cost Explorer views need session tags; this sample's live validation has observed neither ([by federation mode](assets/docs/APPS_GATEWAY.md#credential-process-by-federation-mode)). Note: real-time quota enforcement relies on telemetry emitted from the client rather than actual costs metered by AWS, so figures may differ from CUR.
 
 **Dashboards:** Pre-built CloudWatch dashboards for [Claude Code](assets/images/ClaudeCodeDashboard.png) and [Claude Desktop (Cowork)](assets/images/ClaudeCoworkDashboard.png). See [Monitoring Guide](assets/docs/MONITORING.md) for setup.
 

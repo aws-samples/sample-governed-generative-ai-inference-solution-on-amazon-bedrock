@@ -16,8 +16,9 @@ local implementations. Translating between them would create permanent drift.
 - Mirror `claude-apps-gateway/` and `claude-apps-gateway-bootstrap/`
   byte-for-byte under `vendor/aws-samples/anthropic-on-aws/`.
 - Record the repository commit and subtree hashes in `UPSTREAM.json`.
-- Refresh through `scripts/sync-claude-apps-gateway.sh`; a weekly workflow runs
-  upstream tests and opens a review PR. Never auto-merge or auto-deploy.
+- Refresh through `scripts/sync-claude-apps-gateway.sh`; a workflow (weekly
+  when decided, on demand since: see the status update below) runs upstream
+  tests and opens a review PR. Never auto-merge or auto-deploy.
 - Retire `gip deploy gateway` and `gip deploy bootstrap`. Keep explicit destroy
   support only for legacy GIP stacks.
 - Keep legacy profile fields loadable for migration, but never translate them
@@ -31,6 +32,11 @@ New deployments cannot drift through GIP-specific gateway patches. Upstream
 changes remain reviewable and reproducible. Existing deployments require a
 side-by-side migration; no safe in-place CloudFormation-to-CDK conversion exists
 for the stateful PostgreSQL-backed gateway.
+
+**Status update (2026-11-11):** the sync workflow runs on demand, not weekly:
+a maintainer starts `sync-claude-apps-gateway.yml` (`workflow_dispatch`), or
+proposes a pin locally with `scripts/sync-claude-apps-gateway.sh`. The rest of
+the decision stands.
 
 Supersedes the implementation portions of ADR-0003, ADR-0004, ADR-0025,
 ADR-0032, and ADR-0033.

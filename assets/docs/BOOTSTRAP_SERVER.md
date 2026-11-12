@@ -42,4 +42,5 @@ The legacy templates and Lambda code have been removed from the repository
 `aws cloudformation delete-stack --stack-name <name>` — teardown needs no
 template file. Propose a new upstream pin with
 `scripts/sync-claude-apps-gateway.sh` and materialize it with
-`scripts/fetch-claude-apps-gateway.sh`; pin bumps arrive through a tested review PR.
+`scripts/fetch-claude-apps-gateway.sh`; pull requests that change the pin are
+checked by the `check-claude-apps-gateway-mirror.yml` workflow.

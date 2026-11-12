@@ -51,8 +51,9 @@ prove that the materialized output retained the same paths, types, and modes.
   mutates the parent repository's index.
 - `scripts/sync-claude-apps-gateway.sh` proposes a pin: it writes only
   `UPSTREAM.json` and the `LICENSE` copy, after rejecting a symlink or any other
-  non-regular upstream `LICENSE`. The weekly workflow materializes the proposed
-  pin, runs the upstream tests, and opens or force-updates a review PR.
+  non-regular upstream `LICENSE`. The sync workflow (weekly when decided, on
+  demand since: see the status update below) materializes the proposed pin,
+  runs the upstream tests, and opens or force-updates a review PR.
   After either path it edits the PR title and body so the compare URL and tested
   commit cannot remain stale. Pull requests touching the pin or scripts run the
   fetch, offline verify, and pinned `sync --check` in CI.
@@ -85,6 +86,10 @@ reviewed canonical repository/commit and Git transport. Git modes distinguish
 only executable from non-executable regular files, not full POSIX permissions.
 The host filesystem must preserve the pinned path bytes, symlinks, and executable
 bit; the scripts target Bash on Linux/macOS, not native Windows filesystems.
+
+**Status update (2026-11-11):** the sync workflow described above runs on
+demand, not weekly: a maintainer starts it (`workflow_dispatch`). Pull requests
+that change the pin still run the fetch, offline verify, and `sync --check`.
 
 Identity also does not imply clean content: scan the materialized upstream source
 with your own tooling before you deploy it, and re-scan after every pin change.

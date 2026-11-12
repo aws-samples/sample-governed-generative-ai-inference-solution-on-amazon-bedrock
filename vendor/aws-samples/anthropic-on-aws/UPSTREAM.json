@@ -1,12 +1,12 @@
 {
   "repository": "https://github.com/aws-samples/anthropic-on-aws.git",
-  "commit": "49a637a8f8f249c4715a37179302fa0c49729b41",
-  "commit_date": "2026-08-13T22:15:40Z",
+  "commit": "7163e8f56c9e0901af3cf2885a120bdacfe2d579",
+  "commit_date": "2026-11-10T22:06:12Z",
   "verification": {
     "format": "git-tree-sha1-v1"
   },
   "paths": {
-    "claude-apps-gateway": "f724a2aa67bd4fcc1d025f82c7a7aee7ad4800ce",
-    "claude-apps-gateway-bootstrap": "449deda690671e72b92a6fca24540b4617ce65b9"
+    "claude-apps-gateway": "b1ef147686296d1a89421d67d6b898751299abde",
+    "claude-apps-gateway-bootstrap": "e1b8fd39668ab7cb28cafb6964d1aa97bc30062f"
   }
 }
