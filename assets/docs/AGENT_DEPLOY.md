@@ -72,7 +72,7 @@ example is included there). Recommended baseline for a governed deployment:
   `quota.monthly_cost_limit: <budget>`
 - monitoring enabled (central mode for fleets, sidecar for pilots)
 - `RestrictToAnthropicModels` intent noted for the deploy phase
-- ChatGPT Work / Codex in scope: `aws.allow_openai_models: true`, `metering.enabled: true`, `metering.mode: max` ([ADR-0037](adr/0037-openai-models-on-bedrock-runtime.md))
+- ChatGPT Work / Codex in scope: `aws.allow_openai_models: true`, `metering.enabled: true`, `metering.mode: max` ([ADR-0037](adr/0037-openai-models-on-bedrock-runtime.md)), and for Direct STS `session_name_binding: email` (`gip deploy` refuses `max` without it)
 - inference geography per the human's residency decision
 
 ```bash

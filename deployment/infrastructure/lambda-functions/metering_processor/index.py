@@ -5,7 +5,7 @@
 
 Receives Bedrock model invocation log entries via a CloudWatch Logs
 subscription filter, maps the caller identity to an email (assumed-role
-session name, same parse as quota_check/sidecar_monitor), prices tokens with
+session name, same ARN pattern as quota_check), prices tokens with
 shared/pricing.py, and accrues additive ``server_*`` attributes onto the
 existing UserQuotaMetrics month item in the quota region (plain cross-region
 DynamoDB calls).
@@ -54,6 +54,34 @@ METERING_MODE = os.environ.get("METERING_MODE", "shadow")
 DEDUP_TTL_HOURS = int(os.environ.get("DEDUP_TTL_HOURS", "336"))
 SOURCE_REGION = os.environ.get("AWS_REGION", "unknown")
 
+
+def parse_attributed_roles(value):
+    """Parse ATTRIBUTED_ROLES: comma-separated role names; a trailing '*' makes an entry a prefix.
+
+    Returns (exact_names, prefixes). Entries with a '*' anywhere but the end are ignored
+    (the template's AllowedPattern rejects them before they get here).
+    """
+    exact, prefixes = set(), []
+    for entry in (value or "").split(","):
+        entry = entry.strip()
+        if not entry:
+            continue
+        if entry.endswith("*") and "*" not in entry[:-1] and len(entry) > 1:
+            prefixes.append(entry[:-1])
+        elif "*" not in entry:
+            exact.add(entry)
+    return exact, tuple(prefixes)
+
+
+# Roles whose session names identify a user: the federated role, the IAM Identity
+# Center roles (AWSReservedSSO_*, or a narrower AWSReservedSSO_<set>_*), and any role
+# the operator names (for example a gateway assume_role role). A session of any
+# other role is metered under UNATTRIBUTED#<role>, whatever its session name.
+# Unset or empty attributes no role.
+ATTRIBUTED_ROLES = parse_attributed_roles(os.environ.get("ATTRIBUTED_ROLES", ""))
+if not ATTRIBUTED_ROLES[0] and not ATTRIBUTED_ROLES[1]:
+    print("WARNING: ATTRIBUTED_ROLES is empty; all usage is metered under UNATTRIBUTED#<role>")
+
 # DynamoDB TransactWriteItems accepts at most 100 actions, so each chunk
 # carries up to 99 DEDUP# marker Puts plus the one accrual Update.
 TRANSACT_MAX_ITEMS = 100
@@ -90,26 +118,44 @@ class RecordValidationError(ValueError):
         self.reason = reason
 
 
-def extract_identity(arn):
+# An STS assumed-role session ARN, in full: partition, sts, empty Region, 12-digit account,
+# assumed-role/<role>/<session>, role and session in IAM's characters. Groups: role, session.
+# quota_check/index.py holds the same pattern, and a test keeps the two identical.
+ASSUMED_ROLE_SESSION_ARN = re.compile(
+    r"arn:aws[a-z-]*:sts::[0-9]{12}:assumed-role/([\w+=,.@-]+)/([\w+=,.@-]+)", re.ASCII
+)
+
+
+def role_is_attributed(role, attributed_roles=None):
+    """True when ``role`` is named exactly, or starts with a prefix entry, in the allow-list."""
+    exact, prefixes = ATTRIBUTED_ROLES if attributed_roles is None else attributed_roles
+    return role in exact or any(role.startswith(prefix) for prefix in prefixes)
+
+
+def extract_identity(arn, attributed_roles=None):
     """Map an invocation log ``identity.arn`` to a quota identity.
 
-    Session-name parse mirrors sidecar_monitor._extract_email_from_arn and the
-    quota_check IDC path:
+    Only sessions of an attributed role (ATTRIBUTED_ROLES) are mapped to a user,
+    from an ARN that is, in full, an STS assumed-role session ARN
+    (ASSUMED_ROLE_SESSION_ARN, the pattern quota_check uses):
     - Direct STS: session name = sanitized email (contains '@') -> email.
-    - IDC: AWSReservedSSO role with non-email username -> username.
-    - Anything else (e.g. Cognito federation sets its own session name):
+    - IDC: AWSReservedSSO_ role with non-email username -> username.
+    - Anything else (a role not in the allow-list, a session name that is not an
+      email such as a bound ``sub``, Cognito federation's own session name):
       cannot be mapped per-user -> UNATTRIBUTED#<role> bucket (design Open Q3).
 
-    Returns None when the ARN is not an assumed-role ARN.
+    Returns None when the ARN is not, in full, an assumed-role session ARN (an
+    IAM user, or a string that merely contains such an ARN).
     """
-    if not arn or ":assumed-role/" not in arn:
+    match = ASSUMED_ROLE_SESSION_ARN.fullmatch(arn) if arn else None
+    if not match:
         return None
-    parts = arn.split(":assumed-role/", 1)[1].split("/")
-    role = parts[0]
-    session_name = parts[-1] if len(parts) > 1 else ""
+    role, session_name = match.groups()
+    if not role_is_attributed(role, attributed_roles):
+        return f"UNATTRIBUTED#{role}"
     if "@" in session_name:
         return session_name
-    if session_name and "AWSReservedSSO" in role:
+    if role.startswith("AWSReservedSSO_"):
         return session_name
     return f"UNATTRIBUTED#{role}"
 

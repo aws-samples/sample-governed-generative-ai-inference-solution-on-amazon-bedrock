@@ -585,6 +585,265 @@ def print_guardrails_tier_plan(profile, console: Console) -> None:
     console.print(table)
 
 
+# Stacks whose parameters carry the session-name binding (auth) or the metering
+# mode (quota, metering). Deploying any of them with a profile that fails
+# metering_attribution_check would put that combination into the account.
+METERING_IDENTITY_STACKS = ("auth", "quota", "metering")
+
+_BINDING_DOC = "assets/docs/COST_ATTRIBUTION.md, 'Binding session names to the token claim'"
+
+# Printed once in 'max' mode for profiles whose provider is the sample's Cognito user pool.
+_COGNITO_EMAIL_NOTICE = (
+    "Note: in the Cognito user pool a signed-in user can change their own email address, which is the identity "
+    "max mode charges. With verification before update (a pool deployed from an earlier template needs a stack "
+    "update for it) they can't take a colleague's address, but they can move to another address they own, and "
+    "where their mail system delivers sub-addressed mail (name+tag@) to one mailbox, those addresses have no "
+    "practical bound. Each move starts a usage row at zero, so every limit (user, group and default policies) "
+    "starts again. See assets/docs/QUOTA_MONITORING.md, 'Identity Caveats'."
+)
+
+# Migration step 3 of _BINDING_DOC: the order for a deployment that runs metering_mode 'max'.
+_MAX_BINDING_ORDER = (
+    "session_name_binding to 'email' in the profile, run 'gip package' and distribute the new clients, "
+    "then run 'gip deploy'"
+)
+
+
+def metering_attribution_check(profile) -> tuple[str, str | None]:
+    """Decide whether server-side metering can attribute usage to the user it charges.
+
+    The metering processor keys a user on the assumed-role session name in each
+    Bedrock invocation log record. That name identifies the user only for IAM
+    Identity Center sessions and for Direct STS with SessionNameBinding=email:
+    with 'none' the client chooses the name, with 'sub' the name is an opaque
+    subject the quota API never reads, and Cognito identity pool sessions carry
+    no user at all.
+
+    Returns ("ok", None), ("refuse", message) when metering_mode is 'max' and
+    the identity cannot be attributed, or ("notice", message) for the same
+    identity in 'shadow' mode, which collects figures without enforcing them.
+    """
+    if not getattr(profile, "metering_enabled", False):
+        return "ok", None
+    auth_type = profile.effective_auth_type
+    federation = getattr(profile, "federation_type", "cognito")
+    binding = getattr(profile, "session_name_binding", "none") or "none"
+    if auth_type == "idc":
+        return "ok", None
+    if auth_type == "oidc" and federation == "direct" and binding == "email":
+        return "ok", None
+
+    if auth_type == "oidc" and federation == "direct":
+        if binding == "sub":
+            reason = (
+                "session_name_binding is 'sub', so every session name is the IdP subject, which metering "
+                "cannot map to a user's quota row (all usage lands under UNATTRIBUTED#<role>)"
+            )
+            fix = (
+                f"Set {_MAX_BINDING_ORDER}. Leaving 'sub' has no update-safe order: the trust policy accepts one "
+                f"claim at a time, so clients fail between the rollout and the stack deploy (see {_BINDING_DOC})"
+            )
+        else:
+            reason = (
+                f"session_name_binding is '{binding}', so the client chooses its own session name and any "
+                "signed-in user can have their usage charged to another user"
+            )
+            fix = f"Set {_MAX_BINDING_ORDER} (the order for metering_mode 'max' in {_BINDING_DOC})"
+    elif auth_type == "oidc":
+        reason = (
+            f"federation_type is '{federation}': Cognito identity pool sessions carry no user, so metering "
+            "files all usage under UNATTRIBUTED#<role>"
+        )
+        fix = (
+            "Use Direct STS federation (federation_type 'direct') with session_name_binding 'email'. If this "
+            "deployment already uses Direct STS, set federation_type to 'direct' in the profile"
+        )
+    else:
+        reason = f"auth type '{auth_type}' has no per-user identity"
+        fix = "Use OIDC with Direct STS and session_name_binding 'email', or IAM Identity Center"
+
+    mode = getattr(profile, "metering_mode", "shadow")
+    if mode == "max":
+        return "refuse", (
+            f"Refusing to deploy: metering_mode is 'max', but server-side metering cannot attribute usage to a "
+            f"user: {reason}. A budget enforced on these figures would block the wrong user or nobody.\n"
+            f"Fix: {fix}. Or set metering_mode to 'shadow' to collect server figures without enforcing them."
+        )
+    return "notice", (
+        f"Note: server-side metering runs in '{mode}' mode and cannot attribute usage to a user: {reason}. "
+        f"'gip deploy' refuses metering_mode 'max' with this profile. {fix}."
+    )
+
+
+# One AttributedRoles entry: an IAM role name, optionally ending in '*' for a name
+# prefix. Mirrors the AllowedPattern of quota-metering.yaml (used with fullmatch).
+_ATTRIBUTED_ROLE_RE = re.compile(r"[A-Za-z0-9+=.@_-]{1,64}\*?")
+
+# The prefix every IAM Identity Center role name starts with.
+_IDC_ROLE_PREFIX = "AWSReservedSSO_"
+
+
+def read_stack(cf_manager, stack_name: str) -> tuple[dict | None, str | None]:
+    """DescribeStacks one stack: (stack, None), or (None, reason) when it is absent or the read failed.
+
+    Unlike get_stack_outputs, which returns {} for both, this tells "not deployed" apart
+    from "could not read" (throttling, a missing permission, no credentials).
+    """
+    try:
+        stacks = cf_manager.cf_client.describe_stacks(StackName=stack_name).get("Stacks") or []
+    except ClientError as e:
+        error = e.response.get("Error", {})
+        if error.get("Code") == "ValidationError" and "does not exist" in str(error.get("Message", "")):
+            return None, f"stack '{stack_name}' does not exist in {cf_manager.region}"
+        return None, f"could not read stack '{stack_name}': {e}"
+    except (BotoCoreError, KeyError, TypeError) as e:
+        return None, f"could not read stack '{stack_name}': {e}"
+    if not stacks:
+        return None, f"stack '{stack_name}' does not exist in {cf_manager.region}"
+    return stacks[0], None
+
+
+def metering_attributed_roles(
+    profile, auth_outputs: dict | None, auth_read_error: str | None = None
+) -> tuple[str | None, str | None]:
+    """Build the AttributedRoles value for quota-metering.yaml: the roles whose sessions name a user.
+
+    - IAM Identity Center: every Identity Center role, AWSReservedSSO_*. Identity Center sets
+      the session name (the user's username) on each role it creates, whatever the
+      permission set, so a user's usage through another permission set is still theirs.
+    - OIDC: the auth stack's federated role, from its DirectSTSRoleArn (else FederatedRoleArn)
+      output in a successful read of the stack. A failed read or a missing output is an error,
+      whatever else is listed. When the stack has DirectSTSRoleArn, a saved profile
+      federated_role_arn must match it.
+    - Plus every entry of the profile's metering_attributed_roles (for example a Claude
+      Apps Gateway assume_role role). For auth type 'none' these are the only roles.
+
+    Returns (comma-separated value, None), or (None, message) when the role list cannot be
+    trusted or an entry is invalid; metering is then not deployed rather than deployed
+    attributing the wrong roles or nobody.
+    """
+    extras = getattr(profile, "metering_attributed_roles", None) or []
+    if not isinstance(extras, list) or not all(isinstance(e, str) for e in extras):
+        return None, f"metering_attributed_roles must be a list of IAM role names (got {extras!r})"
+
+    roles: list[str] = []
+    auth_type = profile.effective_auth_type
+    if auth_type == "idc":
+        roles.append(f"{_IDC_ROLE_PREFIX}*")
+    elif auth_type == "oidc":
+        if auth_read_error:
+            return None, (
+                f"Cannot read the auth stack to find the federated role ({auth_read_error}). Deploy the auth "
+                "stack first ('gip deploy auth'), or retry once the stack can be read"
+            )
+        outputs = auth_outputs or {}
+        role_arn = outputs.get("DirectSTSRoleArn") or outputs.get("FederatedRoleArn") or ""
+        if not (role_arn.startswith("arn:") and ":role/" in role_arn):
+            return None, (
+                "Cannot tell which IAM role's sessions server-side metering should attribute: the auth stack "
+                "has no federated role output (DirectSTSRoleArn or FederatedRoleArn). Deploy the auth stack "
+                "first ('gip deploy auth')"
+            )
+        # The profile's federated_role_arn is saved only from DirectSTSRoleArn (_show_stack_outputs,
+        # after a successful run), so it can be current only for a stack that has that output.
+        saved_arn = getattr(profile, "federated_role_arn", None)
+        if saved_arn and outputs.get("DirectSTSRoleArn") and saved_arn != role_arn:
+            return None, (
+                f"The profile's federated_role_arn ({saved_arn}) is not the auth stack's federated role "
+                f"({role_arn}). Run 'gip deploy auth' to bring the profile up to date, or correct "
+                "federated_role_arn in the profile JSON"
+            )
+        roles.append(role_arn.rsplit("/", 1)[-1])
+
+    roles.extend(e.strip() for e in extras)
+
+    invalid = [r for r in roles if not _ATTRIBUTED_ROLE_RE.fullmatch(r)]
+    if invalid:
+        return None, (
+            f"Invalid attributed role name(s) {invalid}: use IAM role names (letters, digits and +=.@_-, "
+            "at most 64 characters), optionally ending in '*' to match a name prefix"
+        )
+    if not roles:
+        return None, (
+            "Cannot tell which IAM role's sessions server-side metering should attribute: auth type "
+            f"'{auth_type}' has no federated role. List the roles in metering_attributed_roles in the profile JSON"
+        )
+    return ",".join(dict.fromkeys(roles)), None
+
+
+def attributed_role_warnings(attributed_roles: str) -> list[str]:
+    """Warn about prefix entries outside IAM Identity Center, which can match many unrelated roles."""
+    warnings = []
+    for entry in attributed_roles.split(","):
+        if entry.endswith("*") and not entry.startswith(_IDC_ROLE_PREFIX):
+            warnings.append(
+                f"Warning: the attributed role entry '{entry}' matches every role whose name starts with "
+                f"'{entry[:-1]}'. Sessions of all of them are charged to the user their session name names; "
+                f"list exact role names unless the prefix is an IAM Identity Center one ({_IDC_ROLE_PREFIX}...)."
+            )
+    return warnings
+
+
+def deployed_binding_refusal(profile, cf_manager) -> str | None:
+    """Refuse 'max' when the deployed auth stack does not bind session names to the email claim.
+
+    metering_attribution_check reads the profile, which can be ahead of the stack: a profile
+    switched to binding 'email' still runs against a trust policy with 'none' until the auth
+    stack is updated. Call this when a run deploys quota or metering in 'max' mode for OIDC
+    without deploying the auth stack. Returns the refusal message, or None when the stack's
+    status ends in _COMPLETE, its SessionNameBinding is 'email' and its FederationType 'direct'.
+    A stack in any other status can't be checked.
+    """
+    auth_stack = profile.stack_names.get("auth", f"{profile.identity_pool_name}-stack")
+    fix = (
+        f"Fix: follow the order for metering_mode 'max' in {_BINDING_DOC}: set {_MAX_BINDING_ORDER}, which "
+        "deploys the auth stack first (or run 'gip deploy auth' before this command). Or set metering_mode to "
+        "'shadow' to collect server figures without enforcing them."
+    )
+    stack, error = read_stack(cf_manager, auth_stack)
+    if not error and not (stack.get("StackStatus") or "").endswith("_COMPLETE"):
+        error = (
+            f"stack '{auth_stack}' is in status '{stack.get('StackStatus') or 'unknown'}', and only a status "
+            "ending in _COMPLETE is accepted"
+        )
+    if error:
+        return (
+            "Refusing to deploy: metering_mode is 'max' and this run does not deploy the auth stack, so the "
+            f"deployed trust must bind session names to the email claim, but it can't be checked: {error}.\n{fix}"
+        )
+    params = {p.get("ParameterKey"): p.get("ParameterValue", "") for p in stack.get("Parameters", [])}
+    binding = params.get("SessionNameBinding") or "none"
+    federation = params.get("FederationType") or "unknown"
+    if binding == "email" and federation == "direct":
+        return None
+    return (
+        f"Refusing to deploy: metering_mode is 'max', but the deployed auth stack '{auth_stack}' has "
+        f"SessionNameBinding '{binding}' and FederationType '{federation}', where the profile has 'email' and "
+        "'direct'. Until the auth stack is updated, metering cannot attribute usage to the user it charges.\n"
+        f"{fix}"
+    )
+
+
+def idc_permission_set_policy_step(profile) -> str:
+    """The one-time step that gives an IAM Identity Center permission set the stack's Bedrock policy."""
+    permission_set = getattr(profile, "idc_permission_set_name", None) or "BedrockDeveloperAccess"
+    policy_name = f"{profile.identity_pool_name}-BedrockAccessPolicy"
+    return (
+        f"IAM Identity Center users get Bedrock access from permission set '{permission_set}', not from "
+        f"this stack. Attach the policy '{policy_name}' (path /) to that permission set once, as a customer "
+        "managed policy reference, from the IAM Identity Center management or delegated administrator "
+        "account, after this stack exists in every account the permission set is assigned to:\n"
+        "  aws sso-admin attach-customer-managed-policy-reference-to-permission-set "
+        "--instance-arn <INSTANCE_ARN> --permission-set-arn <PERMISSION_SET_ARN> "
+        f"--customer-managed-policy-reference Name={policy_name},Path=/\n"
+        "  aws sso-admin provision-permission-set --instance-arn <INSTANCE_ARN> "
+        "--permission-set-arn <PERMISSION_SET_ARN> --target-type ALL_PROVISIONED_ACCOUNTS\n"
+        "Then remove any broader Bedrock allow from the permission set (for example bedrock:InvokeModel* on *): "
+        "IAM allows what any attached policy allows, so a broader allow overrides the policy's model allow-list. "
+        "Later redeploys update the policy in place. See assets/docs/providers/iam-identity-center-setup.md."
+    )
+
+
 def guardrails_auth_grant_status(profile) -> tuple[str, str | None]:
     """Check that the deployed auth stack lets governed roles apply a Standard-tier guardrail.
 
@@ -1336,8 +1595,41 @@ class DeployCommand(Command):
                     stacks_to_deploy.append(("s3bucket", "S3 Bucket"))
                 stacks_to_deploy.append(("skills", "Skills Registry (Agent Registry + artifact bucket)"))
 
+        # Metering that cannot attribute a user must not enforce a budget. Checked from
+        # the profile alone, before any CloudFormation call (dry runs included).
+        if any(stack in METERING_IDENTITY_STACKS for stack, _desc in stacks_to_deploy):
+            verdict, msg = metering_attribution_check(profile)
+            if verdict == "refuse":
+                console.print(msg, style="red", markup=False, highlight=False)
+                return 1
+            if verdict == "notice":
+                console.print(msg, style="yellow", markup=False, highlight=False)
+            if (
+                getattr(profile, "metering_enabled", False)
+                and getattr(profile, "metering_mode", "shadow") == "max"
+                and profile.effective_auth_type == "oidc"
+                and getattr(profile, "provider_type", None) == "cognito"
+            ):
+                console.print(_COGNITO_EMAIL_NOTICE, style="yellow", markup=False, highlight=False)
+
         # Initialize CloudFormation manager
         cf_manager = CloudFormationManager(region=profile.aws_region)
+
+        # The profile can be ahead of the deployed auth stack. When this run enforces
+        # 'max' without updating the auth stack, the stack's own trust must bind the
+        # session name to the email claim (dry runs and --show-commands included).
+        planned = {stack for stack, _desc in stacks_to_deploy}
+        if (
+            getattr(profile, "metering_enabled", False)
+            and getattr(profile, "metering_mode", "shadow") == "max"
+            and profile.effective_auth_type == "oidc"
+            and planned & {"quota", "metering"}
+            and "auth" not in planned
+        ):
+            refusal = deployed_binding_refusal(profile, cf_manager)
+            if refusal:
+                console.print(refusal, style="red", markup=False, highlight=False)
+                return 1
 
         # Show deployment plan
         console.print("\n[bold]Deployment Plan:[/bold]")
@@ -1773,12 +2065,10 @@ class DeployCommand(Command):
                     if not bedrock_regions:
                         bedrock_regions = [r for r in get_all_bedrock_regions() if "gov" not in r]
 
-                    idc_permission_set = getattr(profile, "idc_permission_set_name", None) or "BedrockDeveloperAccess"
-                    existing_role_name = cf_manager.get_stack_parameters(stack_name).get("FederatedRoleName")
-                    federated_role_name = existing_role_name or "BedrockIDCFederatedRole"
+                    # No role is created: users call Bedrock with the permission set's
+                    # credentials, so the stack's policy reaches them only through the
+                    # permission set (step printed after a successful deploy).
                     params = [
-                        f"FederatedRoleName={federated_role_name}",
-                        f"AllowedPermissionSetName={idc_permission_set}",
                         f"IdentityPoolName={profile.identity_pool_name}",
                         f"AllowedBedrockRegions={','.join(bedrock_regions)}",
                         f"RestrictToAnthropicModels={str(getattr(profile, 'restrict_to_anthropic_models', True)).lower()}",
@@ -1786,13 +2076,18 @@ class DeployCommand(Command):
                         f"EnableMonitoring={str(profile.monitoring_enabled).lower()}",
                         f"MonitoringMode={_monitoring_mode_param(profile)}",
                     ]
-                    return deploy_with_cf(
+                    rc = deploy_with_cf(
                         template,
                         stack_name,
                         params,
                         ["CAPABILITY_NAMED_IAM"],
                         task_description="Deploying IAM Identity Center auth stack...",
                     )
+                    if rc == 0:
+                        console.print(
+                            idc_permission_set_policy_step(profile), style="yellow", markup=False, highlight=False
+                        )
+                    return rc
 
                 # Select template based on provider type (OIDC)
                 provider_type = profile.provider_type or "okta"
@@ -2444,7 +2739,7 @@ class DeployCommand(Command):
                             if policy_arn:
                                 console.print(
                                     f"\n[yellow]\u26a0 IAM Auth Mode: Attach this policy to your IDC permission set "
-                                    f"(or the IAM role used by Claude Code users):[/yellow]\n"
+                                    f"(the quota API names a user only for IAM Identity Center sessions):[/yellow]\n"
                                     f"[bold]{policy_arn}[/bold]\n"
                                     f"[dim]This grants execute-api:Invoke on the quota API. "
                                     f"Without it, quota checks will return 403.[/dim]"
@@ -2507,6 +2802,33 @@ class DeployCommand(Command):
                     )
                     regions = [profile.aws_region]
 
+                # Sessions of these roles are mapped to a user; any other role's usage is
+                # metered under UNATTRIBUTED#<role> (AttributedRoles in quota-metering.yaml).
+                auth_outputs, auth_read_error = None, None
+                if profile.effective_auth_type == "oidc":
+                    auth_stack = profile.stack_names.get("auth", f"{profile.identity_pool_name}-stack")
+                    stack, auth_read_error = read_stack(cf_manager, auth_stack)
+                    if stack is not None:
+                        auth_outputs = {o["OutputKey"]: o["OutputValue"] for o in stack.get("Outputs", [])}
+                attributed_roles, roles_error = metering_attributed_roles(profile, auth_outputs, auth_read_error)
+                if roles_error:
+                    console.print(
+                        f"Not deploying server-side metering: {roles_error}.",
+                        style="red",
+                        markup=False,
+                        highlight=False,
+                    )
+                    return 1
+                console.print(
+                    f"Metering attributes usage only to sessions of: {attributed_roles}. Usage from any other "
+                    "role, for example a Claude Apps Gateway role, is metered as unattributed until it is "
+                    "listed in metering_attributed_roles.",
+                    markup=False,
+                    highlight=False,
+                )
+                for warning in attributed_role_warnings(attributed_roles):
+                    console.print(warning, style="yellow", markup=False, highlight=False)
+
                 failed_regions = []
                 for region in regions:
                     region_cf = cf_manager if region == profile.aws_region else CloudFormationManager(region=region)
@@ -2552,6 +2874,7 @@ class DeployCommand(Command):
                             f"QuotaTableName={quota_table_name}",
                             f"QuotaTableRegion={profile.aws_region}",
                             f"MeteringMode={metering_mode}",
+                            f"AttributedRoles={attributed_roles}",
                         ]
                         # CloudWatch alarm actions can't target cross-region SNS
                         # topics — only wire the quota alert topic in its region.
@@ -3054,9 +3377,7 @@ class DeployCommand(Command):
 
             if auth_type == "idc":
                 template = project_root / "deployment" / "infrastructure" / "bedrock-auth-idc.yaml"
-                idc_permission_set = getattr(profile, "idc_permission_set_name", None) or "BedrockDeveloperAccess"
                 params = [
-                    f"AllowedPermissionSetName={idc_permission_set}",
                     f"IdentityPoolName={profile.identity_pool_name}",
                     f"AllowedBedrockRegions={','.join(bedrock_regions)}",
                     f"RestrictToAnthropicModels={str(getattr(profile, 'restrict_to_anthropic_models', True)).lower()}",
@@ -3065,6 +3386,7 @@ class DeployCommand(Command):
                     f"MonitoringMode={_monitoring_mode_param(profile)}",
                 ]
                 print_deploy_cmd(template, stack_name, params, ["CAPABILITY_NAMED_IAM"])
+                console.print(idc_permission_set_policy_step(profile), markup=False, highlight=False)
             else:
                 provider_type = profile.provider_type or "okta"
                 template_map = {

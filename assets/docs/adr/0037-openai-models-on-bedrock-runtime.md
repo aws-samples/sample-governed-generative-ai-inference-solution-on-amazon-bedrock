@@ -73,8 +73,10 @@ caller's assumed-role ARN, `inputTokenCount`, `cacheReadInputTokenCount`,
 - Any model matching `openai.*` is admitted when the flag is on (GPT-5.x and
   GPT-OSS IDs included); narrower pinning would need per-model ARNs.
 - IAM Identity Center: credential-process returns the permission set's
-  credentials and does not assume `BedrockIDCRole`, so the flag does not change
-  what IdC users can call; a narrower permission set needs the same statements
+  credentials, so the flag changes what IdC users can call only once the
+  permission set references the stack's Bedrock access policy (a later
+  change: the stack no longer creates the unused `BedrockIDCRole`); a
+  permission set with its own narrower policy needs the same statements
   (`providers/iam-identity-center-setup.md`, not live-tested with IdC). The
   same holds for `DenyBedrockMantleEndpoint`: for IdC users Mantle is denied
   by what the permission set (and any SCP) allows or denies, so the guide adds

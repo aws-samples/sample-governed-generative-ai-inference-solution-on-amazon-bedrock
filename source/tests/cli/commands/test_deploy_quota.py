@@ -393,6 +393,9 @@ class TestQuotaShowCommandsMatchesDeploy:
             "quota_monitoring_enabled": True,
             "metering_enabled": True,
             "metering_mode": "max",
+            # `max` needs an identity metering can attribute (gip deploy refuses it otherwise).
+            "federation_type": "direct",
+            "session_name_binding": "email",
         }
         data.update(overrides)
         return Profile.from_dict(data)
@@ -406,6 +409,18 @@ class TestQuotaShowCommandsMatchesDeploy:
             MockConfig.load.return_value.get_profile.return_value = profile
             MockConfig.load.return_value.active_profile = "test"
             MockCFM.return_value.get_stack_status.return_value = None
+            # In 'max' mode, a run without the auth stack reads the deployed auth stack's status and binding.
+            MockCFM.return_value.cf_client.describe_stacks.return_value = {
+                "Stacks": [
+                    {
+                        "StackStatus": "UPDATE_COMPLETE",
+                        "Parameters": [
+                            {"ParameterKey": "SessionNameBinding", "ParameterValue": "email"},
+                            {"ParameterKey": "FederationType", "ParameterValue": "direct"},
+                        ],
+                    }
+                ]
+            }
             tester = CommandTester(DeployCommand())
             rc = tester.execute("quota --show-commands")
         out = tester.io.fetch_output() + capsys.readouterr().out

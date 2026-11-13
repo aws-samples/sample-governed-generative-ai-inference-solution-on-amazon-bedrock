@@ -51,6 +51,15 @@ def _load_processor(env: dict) -> object:
     return module
 
 
+# The roles the tests' sessions use, as `gip deploy metering` passes them: the
+# federated roles, an IAM Identity Center permission-set prefix, and a gateway
+# assume_role role an operator named. CustomRole is deliberately absent.
+TEST_ATTRIBUTED_ROLES = (
+    "ClaudeCodeRole,BedrockOidcFederatedRole,CognitoBedrockRole,claude-gateway-bedrock-user,"
+    "AWSReservedSSO_BedrockDeveloper_*"
+)
+
+
 @pytest.fixture
 def base_env():
     return {
@@ -58,6 +67,7 @@ def base_env():
         "QUOTA_TABLE_REGION": "us-east-1",
         "METERING_MODE": "shadow",
         "DEDUP_TTL_HOURS": "24",
+        "ATTRIBUTED_ROLES": TEST_ATTRIBUTED_ROLES,
     }
 
 
@@ -133,7 +143,7 @@ def _update(items: list[dict]) -> dict:
 
 
 # ---------------------------------------------------------------------------
-# Identity extraction (mirrors sidecar_monitor / quota_check parse)
+# Identity extraction (the same ARN pattern as quota_check)
 # ---------------------------------------------------------------------------
 
 
@@ -169,6 +179,57 @@ class TestIdentityExtraction:
 
 
 # ---------------------------------------------------------------------------
+# Only a string that is, in full, an STS assumed-role session ARN names anyone
+# ---------------------------------------------------------------------------
+
+# Each contains a session ARN of an attributed role, or nearly is one, without being one
+# in full. An IAM user's path may hold ':' and '/', so a user ARN can embed the text.
+NOT_A_SESSION_ARN = {
+    "iam-user-path-idc": "arn:aws:iam::123456789012:user/:assumed-role/AWSReservedSSO_BedrockDeveloper_x/victim",
+    "iam-user-path-oidc": "arn:aws:iam::123456789012:user/:assumed-role/ClaudeCodeRole/victim@example.com",
+    "trailing-newline": "arn:aws:sts::123456789012:assumed-role/ClaudeCodeRole/victim@example.com\n",
+    "extra-segment": "arn:aws:sts::123456789012:assumed-role/ClaudeCodeRole/extra/victim@example.com",
+    "text-before": "x arn:aws:sts::123456789012:assumed-role/ClaudeCodeRole/victim@example.com",
+    "region-set": "arn:aws:sts:us-east-1:123456789012:assumed-role/ClaudeCodeRole/victim@example.com",
+    "short-account": "arn:aws:sts::12345678901:assumed-role/ClaudeCodeRole/victim@example.com",
+    "non-ascii-session": "arn:aws:sts::123456789012:assumed-role/ClaudeCodeRole/vict\u00efm@example.com",
+    "no-session": "arn:aws:sts::123456789012:assumed-role/ClaudeCodeRole",
+}
+
+
+class TestSessionArnParse:
+    @pytest.mark.parametrize("partition", ["aws", "aws-cn", "aws-us-gov"])
+    def test_sessions_in_each_partition_resolve(self, mod, partition):
+        sso = f"arn:{partition}:sts::123456789012:assumed-role/AWSReservedSSO_BedrockDeveloper_0123/jdoe"
+        direct = f"arn:{partition}:sts::123456789012:assumed-role/ClaudeCodeRole/alice@example.com"
+        assert mod.extract_identity(sso) == "jdoe"
+        assert mod.extract_identity(direct) == "alice@example.com"
+
+    @pytest.mark.parametrize("arn", list(NOT_A_SESSION_ARN.values()), ids=list(NOT_A_SESSION_ARN))
+    @pytest.mark.parametrize("roles", ["AWSReservedSSO_*", "ClaudeCodeRole"])
+    def test_anything_else_is_not_an_assumed_role_arn(self, mod, arn, roles):
+        assert mod.extract_identity(arn, mod.parse_attributed_roles(roles)) is None
+
+    @pytest.mark.parametrize("arn", list(NOT_A_SESSION_ARN.values()), ids=list(NOT_A_SESSION_ARN))
+    def test_record_never_reaches_the_named_users_row(self, mod, arn):
+        mod.lambda_handler(_make_event([_record(arn=arn)]), None)
+        calls = _transact_calls(mod)
+        assert len(calls) == 1
+        assert _update(calls[0])["Key"]["pk"] == {"S": "USER#UNATTRIBUTED#unknown"}
+        assert "victim" not in json.dumps(calls)
+
+    def test_quota_check_uses_the_same_pattern(self, mod):
+        """The IAM route of the quota API and the processor must agree on what names a user."""
+        path = LAMBDA_PATH.parents[1] / "quota_check" / "index.py"
+        spec = importlib.util.spec_from_file_location("quota_check_same_pattern", path)
+        assert spec is not None and spec.loader is not None
+        quota_check = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(quota_check)
+        assert quota_check.ASSUMED_ROLE_SESSION_ARN.pattern == mod.ASSUMED_ROLE_SESSION_ARN.pattern
+        assert quota_check.ASSUMED_ROLE_SESSION_ARN.flags == mod.ASSUMED_ROLE_SESSION_ARN.flags
+
+
+# ---------------------------------------------------------------------------
 # Claude apps gateway sessions (characterization, not a behaviour change)
 # ---------------------------------------------------------------------------
 
@@ -188,8 +249,9 @@ class TestGatewaySessionAttribution:
     without ``session_name`` every request uses one session named
     ``claude-apps-gateway``; with ``session_name: email|sub`` each developer gets a
     session named after that claim, with characters outside ``[A-Za-z0-9_+,.@-]``
-    written as ``=XX`` per UTF-8 byte. The processor does not look at the calling
-    role, so these tests record which quota row each case reaches.
+    written as ``=XX`` per UTF-8 byte. The gateway role is in ATTRIBUTED_ROLES here,
+    as an operator names it in ``metering_attributed_roles``; these tests record which
+    quota row each case reaches. TestAttributedRoles covers an unnamed gateway role.
     """
 
     def test_email_session_maps_to_the_email(self, mod):
@@ -223,6 +285,68 @@ class TestGatewaySessionAttribution:
     def test_sub_session_is_unattributed(self, mod):
         sub = "8f14e45f-ceea-467f-a0e6-0d4e1f2a3b4c"
         assert mod.extract_identity(_gateway_arn(sub)) == f"UNATTRIBUTED#{GATEWAY_ROLE}"
+
+
+# ---------------------------------------------------------------------------
+# Role allow-list (ATTRIBUTED_ROLES): only named roles' sessions identify a user
+# ---------------------------------------------------------------------------
+
+
+class TestAttributedRoles:
+    def test_email_session_of_an_unnamed_role_is_unattributed(self, mod):
+        """Any Bedrock-capable role whose caller picks the session name could otherwise charge anyone."""
+        arn = "arn:aws:sts::123456789012:assumed-role/CustomRole/bob@example.com"
+        assert mod.extract_identity(arn) == "UNATTRIBUTED#CustomRole"
+
+    def test_unnamed_role_usage_accrues_to_the_unattributed_row(self, mod):
+        event = _make_event([_record(arn="arn:aws:sts::123456789012:assumed-role/CustomRole/bob@example.com")])
+        mod.lambda_handler(event, None)
+        assert _update(_transact_calls(mod)[0])["Key"]["pk"] == {"S": "USER#UNATTRIBUTED#CustomRole"}
+
+    def test_unnamed_gateway_role_is_unattributed(self, mod):
+        arn = "arn:aws:sts::123456789012:assumed-role/other-gateway-role/alice@example.com"
+        assert mod.extract_identity(arn) == "UNATTRIBUTED#other-gateway-role"
+
+    def test_other_permission_set_is_unattributed(self, mod):
+        arn = "arn:aws:sts::123456789012:assumed-role/AWSReservedSSO_AdminAccess_aabbccdd11223344/alice"
+        assert mod.extract_identity(arn) == "UNATTRIBUTED#AWSReservedSSO_AdminAccess_aabbccdd11223344"
+
+    def test_reserved_substring_is_not_enough(self, mod):
+        """A customer role whose name merely contains AWSReservedSSO is not an IAM Identity Center role."""
+        arn = "arn:aws:sts::123456789012:assumed-role/MyAWSReservedSSO_BedrockDeveloper_x/alice"
+        assert mod.extract_identity(arn) == "UNATTRIBUTED#MyAWSReservedSSO_BedrockDeveloper_x"
+
+    def test_named_permission_set_prefix_maps_the_username(self, mod):
+        arn = "arn:aws:sts::123456789012:assumed-role/AWSReservedSSO_BedrockDeveloper_0123456789abcdef/jdoe"
+        assert mod.extract_identity(arn) == "jdoe"
+
+    def test_non_email_session_of_a_named_non_sso_role_is_unattributed(self, mod):
+        arn = "arn:aws:sts::123456789012:assumed-role/ClaudeCodeRole/8f14e45f-ceea-467f-a0e6-0d4e1f2a3b4c"
+        assert mod.extract_identity(arn) == "UNATTRIBUTED#ClaudeCodeRole"
+
+    def test_empty_allow_list_attributes_no_role(self, base_env):
+        module = _load_processor({**base_env, "ATTRIBUTED_ROLES": ""})
+        arn = "arn:aws:sts::123456789012:assumed-role/ClaudeCodeRole/alice@example.com"
+        assert module.extract_identity(arn) == "UNATTRIBUTED#ClaudeCodeRole"
+
+    def test_parse_exact_names_and_prefixes(self, mod):
+        exact, prefixes = mod.parse_attributed_roles(" RoleA , AWSReservedSSO_Dev_*,,Mid*dle,* ")
+        assert exact == {"RoleA"}
+        assert prefixes == ("AWSReservedSSO_Dev_",)
+
+    def test_identity_center_default_list_maps_every_permission_set(self, mod):
+        """`gip deploy metering` passes AWSReservedSSO_* for IAM Identity Center profiles."""
+        allow = mod.parse_attributed_roles("AWSReservedSSO_*")
+        for role in ("AWSReservedSSO_BedrockDeveloper_0123456789abcdef", "AWSReservedSSO_AdminAccess_aabbccdd11223344"):
+            assert mod.extract_identity(f"arn:aws:sts::123456789012:assumed-role/{role}/jdoe", allow) == "jdoe"
+        lookalike = "arn:aws:sts::123456789012:assumed-role/MyAWSReservedSSO_Dev_x/jdoe"
+        assert mod.extract_identity(lookalike, allow) == "UNATTRIBUTED#MyAWSReservedSSO_Dev_x"
+        other = "arn:aws:sts::123456789012:assumed-role/ClaudeCodeRole/alice@example.com"
+        assert mod.extract_identity(other, allow) == "UNATTRIBUTED#ClaudeCodeRole"
+
+    def test_explicit_allow_list_argument_overrides_the_environment(self, mod):
+        arn = "arn:aws:sts::123456789012:assumed-role/CustomRole/bob@example.com"
+        assert mod.extract_identity(arn, ({"CustomRole"}, ())) == "bob@example.com"
 
 
 # ---------------------------------------------------------------------------

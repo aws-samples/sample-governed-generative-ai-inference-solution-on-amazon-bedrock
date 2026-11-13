@@ -117,8 +117,8 @@ def test_short_term_bearer_token_allowed_in_allowed_regions_only(name):
 
 
 def test_idc_setup_guide_lists_the_statements_the_permission_set_needs():
-    """IDC credential-process returns the permission set's credentials and never assumes
-    BedrockIDCRole, so the guide must give the permission set the same two statements."""
+    """IDC credential-process returns the permission set's credentials, and the IDC stack creates
+    no role, so the guide must give the permission set the same two statements."""
     guide = (INFRA_DIR.parent.parent / "assets" / "docs" / "providers" / "iam-identity-center-setup.md").read_text(
         encoding="utf-8"
     )

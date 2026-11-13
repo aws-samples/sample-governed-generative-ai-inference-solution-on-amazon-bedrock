@@ -245,6 +245,9 @@ poetry run gip deploy [stack] [options]
 - Deploys authentication infrastructure (IAM OIDC Provider or Cognito Identity Pool)
 - Creates IAM roles and policies for Bedrock access. For Direct IAM, the role's `MaxSessionDuration` is the profile's `max_session_duration` (43200 when it is null or 0; a profile JSON without the key loads 28800); a value outside 3600–43200 stops the deploy before CloudFormation runs, and lowering it prints a warning, because clients packaged with a longer duration fail until they install a new package
 - Passes `AdoptExistingConfig=true` to the metering stacks when the profile sets `metering_adopt_existing_config`
+- Passes `AttributedRoles` to the metering stacks: the auth stack's federated role, or `AWSReservedSSO_*` (every IAM Identity Center role) for IAM Identity Center, plus the profile's `metering_attributed_roles`; for OIDC, stops when the auth stack can't be read, has no federated role output, or, for Direct STS, names a different role from the profile's `federated_role_arn`, and stops when it can't name any role ([Identity Caveats](QUOTA_MONITORING.md#identity-caveats))
+- Refuses `metering_mode: max` when metering cannot attribute usage to a user (Direct STS without `session_name_binding: email`, Cognito identity pool, or no auth), before any CloudFormation call; prints a notice in `shadow` mode. For OIDC in `max` mode, a run that deploys `quota` or `metering` without `auth` (`--dry-run` and `--show-commands` included) also reads the deployed auth stack and refuses unless its `SessionNameBinding` is `email` and its `FederationType` is `direct`, or when it can't read the stack or the stack's status doesn't end in `_COMPLETE`
+- For IAM Identity Center, prints the one-time step that attaches the stack's Bedrock access policy to the permission set
 - Deploys monitoring infrastructure (if enabled)
 - Shows stack outputs including authentication resource identifiers
 

@@ -1020,6 +1020,35 @@ class QuotaShowCommand(Command):
 
             console.print(table)
 
+            if policy.policy_type == PolicyType.GROUP:
+                group_policies = manager.resolve_group_policies(groups)
+                if len(group_policies) > 1:
+                    console.print(
+                        "\n[bold]Group policies checked:[/bold] access is denied when any one of them would deny"
+                    )
+                    for group_policy in group_policies:
+                        daily = (
+                            f", daily {_format_tokens(group_policy.daily_token_limit)} tokens"
+                            if group_policy.daily_token_limit
+                            else ""
+                        )
+                        cost = (
+                            f", monthly ${group_policy.monthly_cost_limit:.2f}"
+                            if group_policy.monthly_cost_limit
+                            else ""
+                        )
+                        daily_cost = (
+                            f", daily ${group_policy.daily_cost_limit:.2f}" if group_policy.daily_cost_limit else ""
+                        )
+                        console.print(
+                            f"  group:{group_policy.identifier}: monthly "
+                            f"{_format_tokens(group_policy.monthly_token_limit)} tokens{cost}{daily}{daily_cost} "
+                            f"(monthly {group_policy.enforcement_mode.value}, "
+                            f"daily {group_policy.daily_enforcement_mode.value})",
+                            markup=False,
+                            highlight=False,
+                        )
+
             if groups:
                 console.print(f"\n[dim]Groups evaluated: {', '.join(groups)}[/dim]")
 

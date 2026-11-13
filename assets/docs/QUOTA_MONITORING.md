@@ -82,7 +82,7 @@ flowchart TB
     Check -.->|identity missing or internal error; default| Deny
 ```
 
-The two usage records are deliberately independent: client telemetry comes through the OTEL path, while server totals come from Bedrock Runtime invocation logs. Service-generated token counts are tamper-resistant, but their **Direct STS per-user attribution is trustworthy only with `SessionNameBinding=email|sub`**. With `SessionNameBinding=none`, the session name and resulting per-user server bucket remain client-asserted.
+The two usage records are deliberately independent: client telemetry comes through the OTEL path, while server totals come from Bedrock Runtime invocation logs. Service-generated token counts are tamper-resistant, but their **Direct STS per-user attribution is trustworthy only with `SessionNameBinding=email`**. With `SessionNameBinding=none`, the session name and resulting per-user server bucket remain client-asserted. With `SessionNameBinding=sub`, the session name is IdP-bound but is the token's subject, which the processor cannot map to a user, so server figures land under `UNATTRIBUTED#<role>`. `gip deploy` refuses `metering_mode: max` for a Direct STS profile without `email` binding, and, when a run deploys the quota or metering stack without the auth stack, for a deployed auth stack whose `SessionNameBinding` is not `email` (or that it can't read, or whose status doesn't end in `_COMPLETE`).
 
 `shadow` observes drift without changing enforcement; `max` evaluates the higher client or server figure. Neither mode repairs untrusted identity labels or processor records that fail to accrue. There is no `strict` mode. `bedrock-mantle` is denied to governed credentials (for IAM Identity Center, when the permission set carries the deny) because it does not produce the invocation logs required by this flow.
 
@@ -267,9 +267,11 @@ Fine-grained quotas allow administrators to set different limits for different u
 When determining the effective quota for a user:
 
 1. **User-specific policy** (highest priority): If a policy exists for the user's email, use it
-2. **Group policy** (most restrictive): If user belongs to multiple groups with policies, use the **lowest limit** (most restrictive)
-3. **Default policy**: If no user or group policy applies, use the default
+2. **Group policy**: If the user belongs to multiple groups with policies, the quota check evaluates **each** enabled group policy on its own and denies when any one of them would deny. Adding a group can therefore never lift a limit another group blocks on: a `block` group still blocks at its limit when the user is also in an alert-only group with a lower limit. When none of them denies, the response and `gip quota show` name the group policy with the **lowest limit**; `gip quota show` also lists every group policy it checks
+3. **Default policy**: If no user or group policy applies, use the default. It applies only to users with no user or group policy, so a user in any group that has a policy is governed by the group policies even when the default is stricter, which makes group membership an administrator's decision
 4. **No policy**: If no policies are defined, usage is **unlimited** (quota monitoring disabled for that user)
+
+Threshold alerts (the 80%, 90% and 100% emails from the quota monitor) never follow group policies, because usage records carry no groups. With fine-grained quotas, the quota monitor uses the user policy, else the default policy, so a user whose only policies are group policies gets no threshold alert, although those policies can block them. Without fine-grained quotas, it uses the deployment's limits.
 
 ### Limit Types
 
@@ -708,7 +710,7 @@ The Quota Check API is a secured HTTP endpoint that validates user quotas before
 
 The API requires JWT authentication using your OIDC provider's tokens:
 
-> **IAM Identity Center users**: Quota enforcement uses IAM SigV4 authentication instead of JWT. The credential-process signs the quota API request with SigV4 (`execute-api` service). API Gateway validates IAM credentials, and the quota Lambda extracts the user email from the caller ARN session name (`arn:aws:sts::ACCOUNT:assumed-role/Role/user@company.com`). Same per-user DynamoDB lookup and enforcement as OIDC. See [IAM Identity Center Setup](providers/iam-identity-center-setup.md) for details.
+> **IAM Identity Center users**: Quota enforcement uses IAM SigV4 authentication instead of JWT. The credential-process signs the quota API request with SigV4 (`execute-api` service). API Gateway validates IAM credentials, and the quota Lambda takes the user from the session name of an IAM Identity Center role (`arn:aws:sts::ACCOUNT:assumed-role/AWSReservedSSO_<permission set>_<suffix>/user@company.com`), which Identity Center sets to the username, and only when the caller's ARN is such a session ARN in full. Any other IAM caller, such as another role, whose caller picks the session name, or an IAM user, resolves no user and is denied (`missing_identity`). The response carries the unblock expiry but not who unblocked the user or why. Same per-user DynamoDB lookup and enforcement as OIDC. See [IAM Identity Center Setup](providers/iam-identity-center-setup.md) for details.
 
 - **Authentication**: JWT token in `Authorization: Bearer <token>` header (OIDC) or SigV4-signed request (IDC)
 - **Validation**: API Gateway JWT Authorizer validates the token against your OIDC provider
@@ -898,7 +900,7 @@ gip deploy quota --parameters EnableBypassDetection=true
 - Requires email claim in JWT tokens, or email as IAM session name for Identity Center users (see [IAM Identity Center Setup](providers/iam-identity-center-setup.md))
 - Group membership requires JWT group claims from identity provider (not available for IDC users — user-level policies only)
 - Enforcement only at credential issuance (see [Enforcement Timing](#enforcement-timing) for mitigation)
-- **Sidecar attribution is client-asserted, in both directions.** In sidecar mode the `user.email` on telemetry comes from the developer's own machine (the local collector copies it from request headers), and the developer's federated role may write OTLP metrics to the account's CloudWatch dataset. A user with valid credentials can therefore report usage under another user's email: hide their own usage, or inflate a colleague's and push them over quota so that the colleague is blocked. `max` metering mode does not prevent the second case, because it enforces the larger of the client and server figures. For enforcement that must resist this, use central mode, where the collector takes `user.email` from the ALB-validated JWT, with [server-side metering](#server-side-metering-tamper-proof-usage). Central mode doesn't grant that direct dataset write: the auth templates allow `AllowCloudWatchOtlpMetrics` only when `MonitoringMode=sidecar`, which `gip deploy` sets from the profile.
+- **Sidecar attribution is client-asserted, in both directions.** In sidecar mode the `user.email` on telemetry comes from the developer's own machine (the local collector copies it from request headers), and the developer's federated role may write OTLP metrics to the account's CloudWatch dataset. A user with valid credentials can therefore report usage under another user's email: hide their own usage, or inflate a colleague's and push them over quota so that the colleague is blocked. `max` metering mode does not prevent the second case, because it enforces the larger of the client and server figures. For enforcement that must resist this, use central mode, where the collector takes `user.email` from the ALB-validated JWT, with [server-side metering](#server-side-metering-tamper-proof-usage) and `SessionNameBinding=email`, so that the server figure is charged to the user the token names (without binding, the session name the metering processor keys on is client-asserted). Central mode doesn't grant that direct dataset write: the auth templates allow `AllowCloudWatchOtlpMetrics` only when `MonitoringMode=sidecar`, which `gip deploy` sets from the profile.
 
 ## CoWork 3P Usage Counting
 
@@ -972,7 +974,8 @@ Per allowed Bedrock region, an optional stack (`quota-metering.yaml`) deploys:
    ([COST_ATTRIBUTION.md](COST_ATTRIBUTION.md)).
 2. A CloudWatch **log group** (30-day retention) + **subscription filter**.
 3. A **processor Lambda** that maps `identity.arn` → email (assumed-role
-   session name, same parse as the quota API), prices tokens with the shared
+   session name, same parse as the quota API) for sessions of the roles in
+   `AttributedRoles` only (see [Identity Caveats](#identity-caveats)), prices tokens with the shared
    Bedrock rates, **dedupes on `requestId`** (conditional `DEDUP#` marker,
    24 h TTL — retries and DLQ redrives never double count), and accrues
    additive `server_*` attributes onto the same `UserQuotaMetrics` month item
@@ -1081,11 +1084,68 @@ cache write (7,613 tokens), cache read (7,613 tokens), input, and output.
 
 ### Identity Caveats
 
+- The processor maps a session to a user only when its role is in the stack's
+  `AttributedRoles` list; any other role's usage lands under
+  `USER#UNATTRIBUTED#<role>`, whatever its session name. A record whose
+  `identity.arn` is not, in full, an STS assumed-role session ARN (an IAM
+  user's, for example) lands under `USER#UNATTRIBUTED#unknown`. `gip deploy metering`
+  builds the list from the auth stack's federated role for OIDC, or
+  `AWSReservedSSO_*` (every IAM Identity Center role) for IAM Identity Center,
+  plus the role names in the profile's `metering_attributed_roles` (a list; an entry may end
+  in `*` to match a name prefix). For OIDC it reads the federated role from the
+  auth stack's `DirectSTSRoleArn` (or `FederatedRoleArn`) output, and stops,
+  whatever the profile lists, when it can't read the auth stack, when the stack
+  has no such output, or, for a stack with `DirectSTSRoleArn`, when the
+  profile's saved `federated_role_arn` names a different role. It also stops if
+  it can't name any role. The
+  parameter has no default, so the first hand-run update after the upgrade
+  fails before it changes anything unless it passes the list; once the stack
+  has a value, `aws cloudformation deploy` keeps it when the parameter is
+  omitted. Name only roles whose session names users cannot
+  choose: a gateway sets its own, and the Direct STS federated role needs
+  `SessionNameBinding=email`.
 - IAM Identity Center session names are server-derived and map cleanly.
+  Identity Center sets the session name, the user's username, on every role
+  it creates, so `AWSReservedSSO_*` charges a user for usage through any
+  permission set they hold. An assumed-role ARN carries no path, so the
+  processor can't tell an Identity Center role from a customer-created role
+  whose name begins with `AWSReservedSSO_` at path `/`. AWS documentation
+  doesn't say whether IAM accepts or rejects such a name. If it accepts one, a
+  principal allowed to create that role (`iam:CreateRole`) and to assume it
+  could have its sessions attributed by session name; none of the sample's
+  roles grant IAM write access. Ruling it out would need the processor to read
+  the role's path with `iam:GetRole`.
 - Direct STS session names map syntactically, but are client-asserted unless
-  `SessionNameBinding=email|sub` is enabled. Server counts remain
+  `SessionNameBinding=email` is enabled. Server counts remain
   tamper-resistant either way; only binding makes the per-user label
-  IdP-signed and STS-enforced.
+  IdP-signed and STS-enforced. `SessionNameBinding=sub` binds the session
+  name to the token's subject, which the processor cannot map to a user, so
+  those sessions land under `USER#UNATTRIBUTED#<role>`.
+- The bound `email` claim must be one users cannot change at will. In the
+  sample's own Cognito user pool (`cognito-user-pool-setup.yaml`), `email` is
+  a required attribute, so the app clients keep write access to it and a
+  signed-in user can change their own address. The template sets
+  `UserAttributeUpdateSettings.AttributesRequireVerificationBeforeUpdate` to
+  `email`: a new address takes effect only after the user confirms a code sent
+  to it, and until then the ID token keeps the old one. A pool deployed from an
+  earlier version of the template gets this only through a stack update, and
+  addresses changed before that update keep their value. With the setting, a
+  user can't take a colleague's address, but can still move to another address
+  they own, and where their mail system delivers sub-addressed mail
+  (`name+tag@example.com`) to one mailbox, the addresses they own have no
+  practical bound. Each move starts a usage row at zero for the new address,
+  so every limit starts again: group and default policies count from zero, and
+  a user policy set for the old address no longer applies. The options that
+  address this reset are to watch for address changes, or to bind on a claim
+  no app client may write (for example a custom attribute set by
+  administrators and placed in the token by a pre-token-generation trigger,
+  which the sample doesn't set up). Binding on `sub` would close it too, but
+  metering can't map `sub` to a quota row, so `gip deploy` refuses `max` with
+  it. With any other provider, binding `email` is only as strong as the
+  provider's control over who can change that claim; for Entra ID, see the
+  per-provider table in
+  [ADR-0015](adr/0015-session-name-binding.md#per-provider-matrix). In `max`
+  mode, `gip deploy` prints a notice for Cognito user pool profiles.
 - **Cognito federation**: Cognito sets its own session name, so per-user
   mapping is impossible; usage aggregates under `USER#UNATTRIBUTED#<role>`
   (visible in the drift metric, never alerted).
@@ -1096,17 +1156,21 @@ cache write (7,613 tokens), cache read (7,613 tokens), input, and output.
 ### Traffic through Claude Apps Gateway
 
 Bedrock model invocation logging is a per-account, per-Region configuration,
-and the processor reads every record in the log group it subscribes to. It does
-not filter on the calling role: `extract_identity()` in
-`metering_processor/index.py` keys a record by the assumed-role session name in
-`identity.arn`. Bedrock calls that the gateway signs in an account and Region
-where this stack runs are therefore metered like any other call, and the quota
-row they reach depends on the session name the gateway sets (gateway
+and the processor reads every record in the log group it subscribes to.
+`extract_identity()` in `metering_processor/index.py` keys a record by the
+assumed-role session name in `identity.arn`, but only for roles in
+`AttributedRoles` ([Identity Caveats](#identity-caveats)). Bedrock calls that the
+gateway signs in an account and Region where this stack runs are therefore
+metered like any other call. They reach a user's row only when the gateway's
+role is named in the profile's `metering_attributed_roles` (for example
+`"metering_attributed_roles": ["claude-gateway-bedrock-user"]`, then
+`gip deploy metering`); otherwise they land under `USER#UNATTRIBUTED#<role>`.
+For a named role, the row depends on the session name the gateway sets (gateway
 [configuration reference](https://code.claude.com/docs/en/claude-apps-gateway-config#per-developer-aws-cost-attribution)):
 
 | Gateway Bedrock upstream | Session name AWS records | Quota row the processor writes |
 | --- | --- | --- |
-| No `assume_role` | The gateway role's own session | `USER#UNATTRIBUTED#<role>`, unless that session name contains `@` |
+| No `assume_role` | The gateway role's own session | `USER#UNATTRIBUTED#<role>`, unless the role is named and that session name contains `@` |
 | `assume_role` without `session_name` | `claude-apps-gateway`, one session for every developer | `USER#UNATTRIBUTED#<role>` |
 | `assume_role` with `session_name: email` | The developer's email | `USER#<email>`, the row that the same email's credential-process usage reaches |
 | `session_name: email`, email with a character outside letters, digits and `_+,.@-` | The email with each such character written as `=XX` | A row keyed by the encoded name, which the quota API doesn't read for that user |
@@ -1198,7 +1262,10 @@ For budgets that block ChatGPT Work users:
 - `enable_finegrained_quotas: true` for per-user and per-group policies, and
   `--enforcement block` on `gip quota set-user` / `set-group` (the CLI default
   is `alert`).
-- `SessionNameBinding=email|sub` so the per-user label is IdP-signed.
+- `SessionNameBinding=email` so the per-user label is IdP-signed and maps to
+  the user's quota row. `gip deploy` refuses `metering.mode: max` without it
+  (`sub` is IdP-signed too, but metering files it under
+  `UNATTRIBUTED#<role>`, so the user is never blocked).
 
 Expected side effect: client telemetry for a ChatGPT-Work-only user is zero, so
 once the user passes `DRIFT_MIN_SERVER_TOKENS` (default 1M tokens) in a month,

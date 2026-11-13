@@ -543,8 +543,23 @@ def _policy_from_item(item):
         "warning_threshold_80": int(item.get("warning_threshold_80", 0)),
         "warning_threshold_90": int(item.get("warning_threshold_90", 0)),
         "enforcement_mode": item.get("enforcement_mode", "alert"),
+        "daily_enforcement_mode": item.get("daily_enforcement_mode", "alert"),
         "enabled": item.get("enabled", True),
     }
+
+
+def _policy_limit_sort_key(policy):
+    """Order group policies as quota_check does for the policy it reports: the lowest
+    primary limit (cost in cost mode, tokens otherwise), then the other limit.
+
+    The handler passes no groups (usage rows carry none), so alerts follow the user or
+    default policy; this ordering applies only when groups are given.
+    """
+    monthly_cost = float(policy.get("monthly_cost_limit") or 0)
+    monthly_tokens = float(policy.get("monthly_token_limit") or 0)
+    if policy.get("quota_mode") == "cost":
+        return (monthly_cost if monthly_cost > 0 else float("inf"), monthly_tokens or float("inf"))
+    return (monthly_tokens if monthly_tokens > 0 else float("inf"), monthly_cost or float("inf"))
 
 
 def resolve_user_quota(email, groups, policies_cache):
@@ -577,14 +592,7 @@ def resolve_user_quota(email, groups, policies_cache):
         if f"group:{g}" in policies_cache and policies_cache[f"group:{g}"].get("enabled")
     ]
     if group_policies:
-        return min(
-            group_policies,
-            key=lambda p: (
-                p.get("monthly_cost_limit") or float("inf")
-                if p.get("quota_mode") == "cost"
-                else p.get("monthly_token_limit") or float("inf")
-            ),
-        )
+        return min(group_policies, key=_policy_limit_sort_key)
     default_key = "default:default"
     if default_key in policies_cache and policies_cache[default_key].get("enabled"):
         return policies_cache[default_key]
