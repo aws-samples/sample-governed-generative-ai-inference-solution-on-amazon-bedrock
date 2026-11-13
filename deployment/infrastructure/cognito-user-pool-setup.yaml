@@ -1,5 +1,5 @@
 AWSTemplateFormatVersion: '2010-09-09'
-Description: 'Cognito User Pool setup for Claude Code authentication - supports external OIDC providers like Amazon Federate/Midway'
+Description: 'Cognito User Pool setup for Claude Code authentication, with an optional external OIDC identity provider'
 
 Metadata:
   AWS::CloudFormation::Interface:
@@ -20,11 +20,12 @@ Metadata:
         Parameters:
           - EnableCustomClaimInjection
       - Label:
-          default: "Amazon Federate (Amazon internal use only)"
+          default: "External OIDC identity provider (optional)"
         Parameters:
-          - FederateEnvironment
-          - FederateClientId
-          - FederateClientSecret
+          - ExternalOidcIssuerUrl
+          - ExternalOidcClientId
+          - ExternalOidcClientSecret
+          - ExternalOidcProviderName
     ParameterLabels:
       UserPoolName:
         default: "User pool name"
@@ -38,12 +39,14 @@ Metadata:
         default: "Bootstrap server callback URL (optional)"
       EnableCustomClaimInjection:
         default: "Copy custom user attributes into token claims"
-      FederateEnvironment:
-        default: "Federate environment"
-      FederateClientId:
-        default: "Federate client ID"
-      FederateClientSecret:
-        default: "Federate client secret"
+      ExternalOidcIssuerUrl:
+        default: "Issuer URL (leave empty to use only Cognito sign-in)"
+      ExternalOidcClientId:
+        default: "Client ID"
+      ExternalOidcClientSecret:
+        default: "Client secret"
+      ExternalOidcProviderName:
+        default: "Provider name in the user pool"
 
 Parameters:
   UserPoolName:
@@ -69,26 +72,42 @@ Parameters:
     Default: 'http://localhost:8400/logout'
     Description: Comma-delimited list of allowed logout URLs (optional)
 
-  FederateEnvironment:
-    Type: String
-    Default: 'none'
-    AllowedValues:
-      - 'none'
-      - 'integ'
-      - 'prod'
-    Description: Amazon Federate environment to use (for Amazon internal use only)
-
-  FederateClientId:
+  ExternalOidcIssuerUrl:
     Type: String
     Default: ''
-    Description: Client ID from Federate service profile (required if using Federate)
-    NoEcho: true
+    AllowedPattern: '^$|^https://[^\s]+$'
+    ConstraintDescription: Must be empty or an https:// URL
+    Description: >-
+      Issuer URL of your OIDC identity provider (the "issuer" value in its
+      /.well-known/openid-configuration document). Leave empty, the default, to
+      use only Cognito's own sign-in. When set, the user pool trusts this
+      provider and both app clients offer it.
 
-  FederateClientSecret:
+  ExternalOidcClientId:
     Type: String
     Default: ''
-    Description: Client secret from Federate service profile (required if using Federate)
+    Description: >-
+      Client ID of the app registered in your OIDC provider for this user pool.
+      Required when ExternalOidcIssuerUrl is set.
+
+  ExternalOidcClientSecret:
+    Type: String
+    Default: ''
     NoEcho: true
+    Description: >-
+      Client secret of that app. Required when ExternalOidcIssuerUrl is set.
+
+  ExternalOidcProviderName:
+    Type: String
+    Default: 'ExternalOIDC'
+    AllowedPattern: '^[A-Za-z0-9][A-Za-z0-9.-]{1,30}[A-Za-z0-9]$'
+    ConstraintDescription: >-
+      3 to 32 characters: letters, digits, dot or hyphen, starting and ending with
+      a letter or digit
+    Description: >-
+      Name of the identity provider in the user pool, shown on the managed login
+      page and used as the identity_provider parameter. Changing it on an existing
+      stack replaces the provider resource.
 
   EnableCustomClaimInjection:
     Type: String
@@ -112,16 +131,23 @@ Parameters:
       so the device-code bootstrap flow can complete the OIDC authorization.
       Populated automatically when the bootstrap stack is deployed alongside Cognito.
 
+Rules:
+  ExternalOidcRequiresClientCredentials:
+    RuleCondition: !Not [!Equals [!Ref ExternalOidcIssuerUrl, '']]
+    Assertions:
+      - Assert: !Not [!Equals [!Ref ExternalOidcClientId, '']]
+        AssertDescription: ExternalOidcClientId is required when ExternalOidcIssuerUrl is set
+      - Assert: !Not [!Equals [!Ref ExternalOidcClientSecret, '']]
+        AssertDescription: ExternalOidcClientSecret is required when ExternalOidcIssuerUrl is set
+
 Conditions:
-  UseFederate: !Not [!Equals [!Ref FederateEnvironment, 'none']]
-  NotUseFederate: !Equals [!Ref FederateEnvironment, 'none']
-  UseFederateInteg: !Equals [!Ref FederateEnvironment, 'integ']
-  UseFederateProd: !Equals [!Ref FederateEnvironment, 'prod']
+  UseExternalOidc: !Not [!Equals [!Ref ExternalOidcIssuerUrl, '']]
+  NoExternalOidc: !Equals [!Ref ExternalOidcIssuerUrl, '']
   InjectCustomClaims: !Equals [!Ref EnableCustomClaimInjection, 'true']
   HasBootstrapCallback: !Not [!Equals [!Ref BootstrapCallbackUrl, '']]
 
 Resources:
-  # Cognito User Pool with settings matching Amazon Federate requirements
+  # Cognito User Pool
   UserPool:
     Type: AWS::Cognito::UserPool
     Properties:
@@ -151,6 +177,12 @@ Resources:
       # Message configuration - enable email for password reset
       AutoVerifiedAttributes:
         - email
+      # A changed email address takes effect only after the user confirms the code sent to it;
+      # until then the original address stays active and in the tokens. (email is a required
+      # attribute, so every app client keeps write access to it.)
+      UserAttributeUpdateSettings:
+        AttributesRequireVerificationBeforeUpdate:
+          - email
       EmailConfiguration:
         EmailSendingAccount: COGNITO_DEFAULT
       AccountRecoverySetting:
@@ -175,7 +207,7 @@ Resources:
       UserPoolTags:
         Name: !Ref UserPoolName
         Purpose: 'Claude Code Authentication'
-        FederateIntegration: !If [UseFederate, 'true', 'false']
+        ExternalOidcIntegration: !If [UseExternalOidc, 'true', 'false']
       # Optional Pre-Token-Generation trigger that injects custom:* attributes
       # into ID tokens. Required when group-level CloudWatch dashboards are needed.
       LambdaConfig: !If
@@ -224,9 +256,9 @@ Resources:
       # Security settings as specified
       PreventUserExistenceErrors: ENABLED
       EnableTokenRevocation: true
-      # Identity providers - updated based on Federate usage
+      # Identity providers: the external OIDC provider when configured, and Cognito
       SupportedIdentityProviders:
-        - !If [UseFederate, !Ref ExternalIdentityProvider, COGNITO]
+        - !If [UseExternalOidc, !Ref ExternalIdentityProvider, COGNITO]
         - COGNITO
       # Attributes
       ReadAttributes:
@@ -279,7 +311,7 @@ Resources:
       EnableTokenRevocation: true
       # Identity providers - same as main client
       SupportedIdentityProviders:
-        - !If [UseFederate, !Ref ExternalIdentityProvider, COGNITO]
+        - !If [UseExternalOidc, !Ref ExternalIdentityProvider, COGNITO]
         - COGNITO
       # Generate client secret (KEY DIFFERENCE from CLI client)
       GenerateSecret: true
@@ -304,44 +336,42 @@ Resources:
       Domain: !Ref DomainPrefix
       UserPoolId: !Ref UserPool
 
-  # External Identity Provider (Federate/Midway)
+  # External OIDC identity provider (only when ExternalOidcIssuerUrl is set)
   ExternalIdentityProvider:
     Type: AWS::Cognito::UserPoolIdentityProvider
-    Condition: UseFederate
+    Condition: UseExternalOidc
     Properties:
       UserPoolId: !Ref UserPool
-      ProviderName: midway
+      ProviderName: !Ref ExternalOidcProviderName
       ProviderType: OIDC
       ProviderDetails:
-        client_id: !Ref FederateClientId
-        client_secret: !Ref FederateClientSecret
-        authorize_scopes: 'openid'
+        client_id: !Ref ExternalOidcClientId
+        client_secret: !Ref ExternalOidcClientSecret
+        # email is a required user pool attribute, so the provider must release it
+        authorize_scopes: 'openid email profile'
         attributes_request_method: GET
-        oidc_issuer: !If
-          - UseFederateInteg
-          - 'https://idp-integ.federate.amazon.com'
-          - 'https://idp.federate.amazon.com'
+        oidc_issuer: !Ref ExternalOidcIssuerUrl
+      # Standard OIDC claim names (OpenID Connect Core 1.0, section 5.1)
       AttributeMapping:
         preferred_username: sub
-        email: EMAIL
-        given_name: GIVEN_NAME
-        family_name: FAMILY_NAME
+        email: email
+        given_name: given_name
+        family_name: family_name
 
   # Update client to use external provider after it's created
   ClientUpdate:
     Type: AWS::CloudFormation::CustomResource
-    Condition: UseFederate
-    DependsOn: ExternalIdentityProvider
+    Condition: UseExternalOidc
     Properties:
       ServiceToken: !GetAtt UpdateClientFunction.Arn
       UserPoolId: !Ref UserPool
       ClientId: !Ref UserPoolClient
-      ProviderName: midway
+      ProviderName: !Ref ExternalIdentityProvider
 
   # Lambda function to update client with external provider
   UpdateClientFunction:
     Type: AWS::Lambda::Function
-    Condition: UseFederate
+    Condition: UseExternalOidc
     Metadata:
       cfn_nag:
         rules_to_suppress:
@@ -423,7 +453,7 @@ Resources:
   # IAM role for Lambda
   UpdateClientRole:
     Type: AWS::IAM::Role
-    Condition: UseFederate
+    Condition: UseExternalOidc
     Metadata:
       guard:
         SuppressedRules:
@@ -576,7 +606,6 @@ Resources:
   # Custom Resource to automatically store distribution web client secret
   DistributionWebClientSecret:
     Type: AWS::CloudFormation::CustomResource
-    DependsOn: DistributionWebClient
     Properties:
       ServiceToken: !GetAtt SecretStoreFunction.Arn
       UserPoolId: !Ref UserPool
@@ -675,7 +704,7 @@ Outputs:
       Name: !Sub '${AWS::StackName}-Domain'
 
   IdpResponseEndpoint:
-    Description: IDP response endpoint for Federate configuration
+    Description: Redirect URI to register with your external OIDC identity provider
     Value: !Sub 'https://${DomainPrefix}.auth.${AWS::Region}.amazoncognito.com/oauth2/idpresponse'
 
   GIPConfiguration:
@@ -723,58 +752,38 @@ Outputs:
       - No manual copy-paste required!
       - The callback URL comes from the landing-page stack outputs after deployment
 
-  FederateSetupInstructions:
-    Condition: UseFederate
-    Description: Federate has been configured
-    Value: !Sub
-      - |
-        Federate integration has been configured with:
-        - Environment: ${FederateEnvironment}
-        - Provider Name: midway
-        - Issuer: ${IssuerUrl}
-
-        The redirect URI for Federate is:
-        https://${DomainPrefix}.auth.${AWS::Region}.amazoncognito.com/oauth2/idpresponse
-
-        To complete setup:
-        1. Ensure your Federate service profile includes this redirect URI
-        2. Verify the client ID and secret match your Federate configuration
-        3. Add allowed/restricted groups in Federate for access control
-      - IssuerUrl: !If
-          - UseFederateInteg
-          - 'https://idp-integ.federate.amazon.com'
-          - 'https://idp.federate.amazon.com'
-
-  ManualFederateSetup:
-    Condition: NotUseFederate
-    Description: Instructions for manual Federate setup
+  ExternalOidcSetupInstructions:
+    Condition: UseExternalOidc
+    Description: External OIDC identity provider configured on the user pool
     Value: !Sub |
-      To add Amazon Federate/Midway authentication:
+      The user pool trusts this OIDC identity provider:
+      - Provider name: ${ExternalIdentityProvider}
+      - Issuer: ${ExternalOidcIssuerUrl}
 
-      1. Create a Federate service profile at:
-         - Integ: https://integ.ep.federate.a2z.com/
-         - Prod: https://prod.ep.federate.a2z.com/
+      To complete setup in your identity provider:
+      1. Register this redirect URI for client ID ${ExternalOidcClientId}:
+         https://${DomainPrefix}.auth.${AWS::Region}.amazoncognito.com/oauth2/idpresponse
+      2. Allow the scopes openid, email and profile, and release the email claim:
+         email is a required attribute of this user pool.
+      3. Restrict which of your users may sign in (groups or app assignment) in the
+         identity provider.
 
-      2. Configure the service profile:
-         - Service Name: Your service name
-         - Protocol: OIDC
-         - Client ID: Create a unique identifier
+  ExternalOidcManualSetup:
+    Condition: NoExternalOidc
+    Description: How to add an external OIDC identity provider to this user pool
+    Value: !Sub |
+      To let users sign in through your own OIDC identity provider:
+
+      1. Register an app (a confidential web client) in your identity provider:
          - Redirect URI: https://${DomainPrefix}.auth.${AWS::Region}.amazoncognito.com/oauth2/idpresponse
-         - Claims: EMAIL, GIVEN_NAME, FAMILY_NAME
-         - Groups: Configure allowed LDAP/ANT/POSIX groups
+         - Scopes: openid, email, profile
+         - Note its client ID, client secret and issuer URL
 
-      3. In Cognito Console:
-         - Go to User Pool > Sign-in experience > Identity providers
-         - Add identity provider > OpenID Connect
-         - Provider name: midway
-         - Client ID: (from Federate)
-         - Client secret: (from Federate)
-         - Issuer URL: https://idp.federate.amazon.com (or idp-integ for testing)
-         - Scopes: openid
-         - Attribute mapping:
+      2. Update this stack with the parameters ExternalOidcIssuerUrl,
+         ExternalOidcClientId and ExternalOidcClientSecret (and optionally
+         ExternalOidcProviderName). The stack creates the identity provider with
+         this attribute mapping and adds it to both app clients:
            * sub → preferred_username
-           * EMAIL → email
-           * GIVEN_NAME → given_name
-           * FAMILY_NAME → family_name
-
-      4. Update app client to include 'midway' in supported identity providers
+           * email → email
+           * given_name → given_name
+           * family_name → family_name

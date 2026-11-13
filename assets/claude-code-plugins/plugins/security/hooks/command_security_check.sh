@@ -20,27 +20,55 @@ set -euo pipefail
 # Read Claude Code hook input from stdin
 INPUT_JSON=$(cat)
 
+# If stderr can't be written (closed by the caller), send it to /dev/null, so that a failed
+# message can't end the hook before its checks have run. (`>&2` is tried first, on the
+# inherited descriptor; the `2>/dev/null` after it only quiets bash's own error.)
+: >&2 2>/dev/null || exec 2>/dev/null
+
 # Extract command from hook input
 COMMAND=$(echo "$INPUT_JSON" | jq -r '.tool_input.command // empty')
-PROJECT_ROOT=${CLAUDE_PROJECT_DIR:-$(pwd)}
+
+# Set on every block path before anything else runs, so that a failure after that point
+# (in logging or in printing the message) still ends the hook with exit 2.
+BLOCKING=0
 
 if [ -z "$COMMAND" ]; then
     # No command to validate
     exit 0
 fi
 
-# Function to log security events
+# Function to log security events.
+# The log lives in the user's home, not the project tree: a flagged command can carry a
+# token, and a file under the project could be committed. CLAUDE_SECURITY_AUDIT_LOG
+# overrides the path; the file is created readable by the user only.
+# Logging never changes the outcome: if the log can't be written, the hook warns on stderr
+# and carries on, so a blocked command stays blocked.
 log_security_event() {
     local event_type="$1"
-    local command="$2" 
+    local command="$2"
     local result="$3"
-    
-    local log_dir="$PROJECT_ROOT/.claude"
-    mkdir -p "$log_dir"
-    local log_file="$log_dir/security-audit.log"
-    local timestamp=$(date '+%Y-%m-%d %H:%M:%S')
-    
-    echo "$timestamp COMMAND_SECURITY_CHECK $event_type \"$command\" $result" >> "$log_file"
+
+    local log_file="${CLAUDE_SECURITY_AUDIT_LOG:-}"
+    if [ -z "$log_file" ]; then
+        if [ -z "${HOME:-}" ]; then
+            echo "Security hook audit warning: HOME and CLAUDE_SECURITY_AUDIT_LOG are unset; event not logged" >&2
+            return 0
+        fi
+        log_file="$HOME/.claude/security-audit.log"
+    fi
+    local timestamp
+    timestamp=$(date '+%Y-%m-%d %H:%M:%S' 2>/dev/null) || timestamp="unknown-time"
+
+    local log_dir
+    log_dir="$(dirname "$log_file")"
+    if ! mkdir -p "$log_dir" 2>/dev/null; then
+        echo "Security hook audit warning: cannot create $log_dir; event not logged" >&2
+        return 0
+    fi
+    if ! (umask 077; echo "$timestamp COMMAND_SECURITY_CHECK $event_type \"$command\" $result" >> "$log_file") 2>/dev/null; then
+        echo "Security hook audit warning: cannot write $log_file; event not logged" >&2
+    fi
+    return 0
 }
 
 # Function to block dangerous commands
@@ -61,6 +89,7 @@ check_dangerous_commands() {
     
     for pattern in "${dangerous_patterns[@]}"; do
         if [[ "$cmd" == *"$pattern"* ]]; then
+            BLOCKING=1
             echo "❌ SECURITY VIOLATION: Dangerous command blocked" >&2
             echo "Command: $cmd" >&2
             echo "" >&2
@@ -95,6 +124,7 @@ check_suspicious_operations() {
                 continue
             fi
             
+            BLOCKING=1
             echo "❌ SECURITY VIOLATION: Suspicious download and execute pattern" >&2
             echo "Command: $cmd" >&2 
             echo "" >&2
@@ -160,6 +190,7 @@ check_destructive_operations() {
     
     # Check for dangerous chmod operations  
     if echo "$cmd" | grep -qE "chmod\s+(777|666)"; then
+        BLOCKING=1
         echo "❌ SECURITY VIOLATION: Dangerous permissions detected" >&2
         echo "Command: $cmd" >&2
         echo "" >&2
@@ -212,6 +243,7 @@ check_sudo_usage() {
     local cmd="$1"
     
     if echo "$cmd" | grep -qE "^\s*sudo\b"; then
+        BLOCKING=1
         echo "❌ SECURITY VIOLATION: sudo operations not permitted" >&2
         echo "Command: $cmd" >&2
         echo "" >&2
@@ -232,6 +264,7 @@ check_network_security() {
     
     # Check for connections to suspicious domains
     if echo "$cmd" | grep -qE "(localhost|127\.0\.0\.1).*\|.*sh"; then
+        BLOCKING=1
         echo "❌ SECURITY VIOLATION: Local network execution detected" >&2
         echo "Command: $cmd" >&2
         echo "" >&2
@@ -272,8 +305,11 @@ main() {
     exit 0
 }
 
-# Error handling
-trap 'echo "Security hook error on line $LINENO" >&2; exit 0' ERR
+# Error handling. Once a block decision is made, the hook exits 2 however the script ends:
+# set -e can stop it inside a function, and this EXIT trap then enforces the status. An
+# error before any block decision ends the hook with the failing command's own status and
+# no message from the hook; that blocks the command only if the status happens to be 2.
+trap 'if [ "$BLOCKING" = 1 ]; then exit 2; fi' EXIT
 
 # Run main function
 main

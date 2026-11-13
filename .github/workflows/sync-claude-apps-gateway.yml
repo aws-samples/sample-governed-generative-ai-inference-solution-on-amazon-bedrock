@@ -42,7 +42,7 @@ jobs:
           node-version: '20'
 
       - name: Install shell-test dependency
-        run: pip install PyYAML
+        run: pip install PyYAML==6.0.3  # keep equal to source/poetry.lock
 
       - name: Test upstream gateway CDK
         working-directory: vendor/aws-samples/anthropic-on-aws/claude-apps-gateway/cdk

@@ -462,14 +462,14 @@ CLI app client itself has **no secret** (`UserPoolClient` sets
 `GenerateSecret: false` — it is a public PKCE client), so there is nothing to
 rotate on the end-user path.
 
-### 6a. External IdP (Federate/OIDC) client secret
+### 6a. External OIDC identity provider client secret
 
 The upstream IdP's client secret enters the stack as the
-`FederateClientSecret` parameter (`NoEcho`) and lands in the identity
+`ExternalOidcClientSecret` parameter (`NoEcho`) and lands in the identity
 provider's `ProviderDetails.client_secret`
 (`cognito-user-pool-setup.yaml`, resource `ExternalIdentityProvider`).
 
-1. Create the new secret in the upstream IdP (Federate service profile);
+1. Create the new secret in the upstream IdP (the app registered for this user pool);
    keep the old one valid if the IdP supports overlap.
 2. Update the stack — `aws cloudformation deploy` reuses previous values for
    any parameter you don't override:
@@ -479,7 +479,7 @@ provider's `ProviderDetails.client_secret`
      --template-file deployment/infrastructure/cognito-user-pool-setup.yaml \
      --stack-name gip-user-pool \
      --capabilities CAPABILITY_IAM \
-     --parameter-overrides FederateClientSecret=<new-secret>
+     --parameter-overrides ExternalOidcClientSecret=<new-secret>
    ```
 
    (Avoid `aws cognito-idp update-identity-provider` for this: it replaces
@@ -680,7 +680,7 @@ schedule, and several data stores retain the user's email after departure.
 
 | # | Action / effect | Latency after IdP deactivation |
 |---|---|---|
-| 1 | Deactivate the user in the IdP (Okta/Entra/Federate) | you do this — everything below keys off it |
+| 1 | Deactivate the user in the IdP (Okta, Entra ID or your OIDC provider) | you do this — everything below keys off it |
 | 2 | OIDC refresh stops: the IdP returns `invalid_grant`, the client discards the stored refresh token and the interactive browser flow also fails (`source/go/internal/oidc/token.go:RefreshTokenExchange`). A cached ID token that hasn't expired can still be exchanged for new credentials (`credential-process` silent refresh) | immediate for refresh (direct-IdP profiles); a cached ID token works until it expires, which is your IdP's ID-token lifetime |
 | 3 | **Cognito user-pool caveat**: Cognito issues its *own* refresh token (valid 600 minutes = 10 h, `cognito-user-pool-setup.yaml` `UserPoolClient.RefreshTokenValidity`) and does not re-check the upstream IdP on refresh. Explicitly revoke: | up to 10 h unless revoked |
 | 4 | Live STS sessions keep working until expiry, unless you deny that user's role session (see **Per-user cut-off** below). A cached ID token can also create new sessions until it expires (row 2) | ≤ the `MaxSessionDuration` in force when each session was issued, for direct federation (`bedrock-auth-*.yaml`; the profile's `max_session_duration` after `gip deploy auth`, 43200 = 12 h on stacks deployed before that; `aws iam get-role` shows it); ≤ 1 h for Cognito identity-pool credentials, which the enhanced flow (`GetCredentialsForIdentity`) issues for one hour whatever the role's `MaxSessionDuration` ([identity pools authentication flow](https://docs.aws.amazon.com/cognito/latest/developerguide/authentication-flow.html)) |

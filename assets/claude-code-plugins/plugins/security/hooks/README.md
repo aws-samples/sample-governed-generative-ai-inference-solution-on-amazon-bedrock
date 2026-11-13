@@ -6,6 +6,8 @@ This plugin ships two complementary hook configurations. They can be used indepe
 
 The original hooks: `security_check.py` (PreToolUse on Write/Edit/MultiEdit — sensitive-file and secret-in-content checks) and `command_security_check.sh` (PreToolUse on Bash — dangerous-command blocking). See that file's `usage` block.
 
+Both append to `~/.claude/security-audit.log`, outside the project tree, because a flagged command can carry a token. The file is created readable by your user only; set `CLAUDE_SECURITY_AUDIT_LOG` to log elsewhere. If the log can't be written (read-only home, a bad override path), both hooks print a warning on stderr and enforce as usual: a blocked command stays blocked. With `HOME` unset and no override, `command_security_check.sh` skips the log with a warning, and `security_check.py` logs to the account's home directory, which Python finds without `HOME`.
+
 ## `fail_closed_gates.json` — fail-closed enforcement
 
 Adds three enforcement hooks plus a telemetry shim. Every hook is invoked through `hook_wrapper.sh`, which converts a silent hook crash or timeout into an explicit `exit 2` (denial) — a broken control fails *safe*, not *open*.

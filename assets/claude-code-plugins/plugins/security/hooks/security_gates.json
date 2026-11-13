@@ -65,7 +65,7 @@
     }
   },
   "monitoring": {
-    "audit_log_location": ".claude/security-audit.log",
+    "audit_log_location": "~/.claude/security-audit.log (override with CLAUDE_SECURITY_AUDIT_LOG)",
     "log_format": "TIMESTAMP EVENT_TYPE TOOL/COMMAND RESULT",
     "log_rotation": "Logs are automatically truncated to last 1000 entries",
     "alerting": "Consider monitoring the audit log for security events"

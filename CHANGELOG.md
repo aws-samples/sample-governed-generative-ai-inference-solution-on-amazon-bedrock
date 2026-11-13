@@ -13,6 +13,102 @@ Changes on this fork relative to upstream `beta`.
 
 ### Changed
 
+- **Cognito user pool: the optional external identity provider takes your own
+  OIDC issuer.** `cognito-user-pool-setup.yaml` replaces the three earlier
+  parameters of its external identity-provider option with
+  `ExternalOidcIssuerUrl`, `ExternalOidcClientId`, `ExternalOidcClientSecret`
+  (`NoEcho`) and `ExternalOidcProviderName` (default `ExternalOIDC`). The
+  client ID is no longer masked with `NoEcho`, since it is not a secret; the
+  secret still is. The option stays off by default: it is on when
+  `ExternalOidcIssuerUrl` is set, and a rule then requires the client ID and
+  secret. The provider asks for the `openid email profile` scopes and maps the
+  standard claims (`sub` to `preferred_username`, and `email`, `given_name`,
+  `family_name`). The outputs that describe the option are now
+  `ExternalOidcSetupInstructions` and `ExternalOidcManualSetup`, and the user
+  pool tag is `ExternalOidcIntegration`. The guide, runbook section 6a and
+  `RESOURCE_INVENTORY.md` follow.
+  **Upgrade note.** A stack that never set the option changes only that tag
+  and the output name on update; no resource is replaced. A stack that set it
+  must pass the new parameters on its next update, or the update deletes the
+  identity provider and its custom resource, function and role. To keep the
+  existing provider, set `ExternalOidcProviderName` to its current name (`aws
+  cognito-idp list-identity-providers --user-pool-id <id>`), because a new
+  name replaces the provider, and set `ExternalOidcIssuerUrl` to its issuer
+  (`aws cognito-idp describe-identity-provider`). Before updating, check that
+  the provider allows the `email` and `profile` scopes, which the user pool
+  now requests in addition to `openid`, and releases the standard `email`,
+  `given_name` and `family_name` claims: the earlier mapping read other claim
+  names.
+- **The collector builder is verified before it runs.** `gip package` and
+  `scripts/prepare-offline-go-bundle.sh` (run by `gip package
+  --prepare-offline`) check the OpenTelemetry Collector Builder (OCB) binary
+  against the SHA-256 that its release publishes, pinned per OS and architecture
+  next to `OCB_VERSION` in `package.py`; the script reads the same table.
+  `gip package` checks on download and on every reuse of the cached copy in
+  `~/.cache/ocb`; a mismatch or an asset without a pinned digest stops the
+  collector build before the builder runs, and packaging continues without the
+  sidecar collector and prints why. The script checks before it makes the
+  builder executable or runs it, in both `prepare` and `install`, and on a
+  mismatch removes the file and exits non-zero; with no pinned digest it does
+  not download. Both write a download to a temporary name and give it the
+  builder's name only after it verifies. A cached builder that no longer
+  matches must be checked and removed by hand. The script now needs
+  `sha256sum` or `shasum`.
+- **Package builds pin the packages they install by name.** The Linux Docker
+  builds of the Python credential provider and OTEL helper, the macOS
+  cross-architecture build environment and the CodeBuild buildspecs in
+  `codebuild-windows.yaml` (Windows, Linux x64 and Linux arm64) install each
+  package named in a `pip install` at an exact version; the Docker and
+  CodeBuild builds also pin the pip they upgrade to (26.3). The packages those
+  depend on are not pinned and resolve within the ranges the named packages
+  declare. Packages the CLI also depends on take their `source/poetry.lock`
+  version: the Docker and macOS builds read it from the lock and fail rather
+  than install a named package without a pin, and a test fails when a
+  buildspec version differs from the lock. The exceptions keep earlier build
+  pins (PyInstaller 6.3.0 in the Docker and Linux CodeBuild builds, six 1.16.0
+  in the credential provider's Docker build, Nuitka 2.7.12 on Windows) or hold
+  certifi at 2026.10.23 on Windows, a release without the CA-bundle advisory
+  that affects the lock's version. The Windows build installs Python 3.12.10
+  from Chocolatey (`python312 --version 3.12.10`); its MinGW compiler is not
+  pinned and takes the feed's latest version. Redeploy the CodeBuild stack to
+  use the new buildspecs; a macOS build environment created before this change
+  keeps its packages until it is rebuilt.
+- **Workflows pin their actions and their pip installs.** Every third-party
+  action reference names a full commit. References that named a tag now name
+  the commit that tag pointed to on 2026-11-12, with the tag kept as a
+  trailing comment so Dependabot can still propose updates. Every package a
+  workflow names in a `pip install` carries an exact version; packages also in
+  `source/poetry.lock` use the lock version, and `detect-secrets` is 1.5.0,
+  the version that writes `.secrets.baseline`. The packages those depend on
+  resolve within their declared ranges. A test fails when a workflow uses an
+  action by tag or branch, or installs a named package without an exact
+  version.
+- **The example security plugin logs outside the project tree.**
+  `command_security_check.sh` and `security_check.py` append to
+  `~/.claude/security-audit.log` instead of `.claude/security-audit.log` in the
+  project, because a flagged command can carry a token and a file in the project
+  can be committed. The log is created readable by the user only, and
+  `CLAUDE_SECURITY_AUDIT_LOG` sets another path. If the log can't be written,
+  both hooks warn on stderr and enforce as usual: the command hook still exits 2
+  for a blocked command, also when `HOME` is unset or stderr is closed. A
+  project that used the plugin before may still hold the old log under its
+  `.claude/` directory; delete it.
+- **Cognito user pool: a changed email address must be verified first.**
+  `cognito-user-pool-setup.yaml` sets `UserAttributeUpdateSettings` so that a
+  changed `email` takes effect only after the user confirms the code sent to
+  the new address; until then the original address stays active and in the
+  tokens. The guide explains how an administrator changes an address.
+  **Upgrade note.** A stack update changes the user pool in place; nothing is
+  replaced. From then on, a user who changes their own `email` keeps the old
+  address until they enter the code sent to the new one. Addresses changed
+  before the update keep their current value: review users whose
+  `email_verified` is `false`. Users who sign in through the external provider
+  show `false` unless an administrator sets it, because the provider's
+  `email_verified` claim is not mapped and Cognito treats a mapped address as
+  unverified by default; their address comes from the provider. An
+  administrator changes an address with `aws cognito-idp
+  admin-update-user-attributes`, adding `Name=email_verified,Value=true` to
+  make it active without a code.
 - The Claude Apps Gateway pin in `vendor/aws-samples/anthropic-on-aws/UPSTREAM.json`
   moves to `aws-samples/anthropic-on-aws` commit `7163e8f` (2026-11-10). The deploy
   steps in `APPS_GATEWAY.md` now say to stage the Linux `claude` binary before
@@ -485,6 +581,8 @@ The first nine entries were found in an end-to-end sidecar-mode test on
 
 ### Documentation
 
+- The README's comparison with Claude Apps Gateway lists what the gateway does
+  not include today, without speculating on its future.
 - `APPS_GATEWAY.md` covers Amazon Cognito as the gateway's identity provider:
   `oidc.groups_claim` for Cognito's `cognito:groups` claim, the
   `scopes: [openid, email, profile]` override that the upstream sample

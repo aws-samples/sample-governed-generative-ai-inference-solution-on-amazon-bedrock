@@ -3,6 +3,7 @@
 
 """Tests for CloudFormation template configuration."""
 
+import itertools
 import re
 from pathlib import Path
 
@@ -759,6 +760,155 @@ class TestSecretStoreRoleScoped:
                 f"secretsmanager grant not scoped to the managed secret: {arn}"
             )
             assert not arn.endswith(":secret:*"), f"wildcard secret grant: {arn}"
+
+
+class TestCognitoUserPoolExternalOidc:
+    """The user pool's optional external identity provider takes a customer-supplied OIDC issuer.
+
+    The four conditional resources keep their logical IDs, so a stack that passes its values under the
+    new parameter names keeps its resources; the option is off unless an issuer URL is given.
+    """
+
+    CONDITIONAL_RESOURCES = ("ExternalIdentityProvider", "ClientUpdate", "UpdateClientFunction", "UpdateClientRole")
+
+    def get_template(self):
+        return load_infra_template("cognito-user-pool-setup.yaml")
+
+    def test_parameters_are_issuer_client_and_provider_name(self):
+        params = self.get_template()["Parameters"]
+        oidc = sorted(p for p in params if p.startswith("ExternalOidc"))
+        assert oidc == [
+            "ExternalOidcClientId",
+            "ExternalOidcClientSecret",
+            "ExternalOidcIssuerUrl",
+            "ExternalOidcProviderName",
+        ]
+        assert params["ExternalOidcClientSecret"].get("NoEcho") is True
+        assert params["ExternalOidcIssuerUrl"]["Default"] == ""
+        assert re.fullmatch(params["ExternalOidcIssuerUrl"]["AllowedPattern"], "")
+        assert re.fullmatch(params["ExternalOidcIssuerUrl"]["AllowedPattern"], "https://login.example.com/tenant")
+        assert not re.fullmatch(params["ExternalOidcIssuerUrl"]["AllowedPattern"], "http://login.example.com")
+
+    PROVIDER_NAMES_ACCEPTED = ("ExternalOIDC", "Okta", "corp-sso", "login.example", "a1b", "A" * 32)
+
+    def test_provider_name_pattern_rejects_names_cognito_rejects(self):
+        ours = self.get_template()["Parameters"]["ExternalOidcProviderName"]
+        pattern = ours["AllowedPattern"]
+
+        rejected = ["Corp_SSO", "C_rp", "_Corp", "Corp_", "ab", "-Corp", "Corp.", "Corp SSO", "A" * 33]
+        for name in self.PROVIDER_NAMES_ACCEPTED:
+            assert re.fullmatch(pattern, name), name
+        for name in rejected:
+            assert not re.fullmatch(pattern, name), name
+        assert re.fullmatch(pattern, ours["Default"])
+        assert "underscore" not in ours["ConstraintDescription"]
+
+    def test_provider_name_pattern_accepts_only_names_cognito_accepts(self):
+        regex = pytest.importorskip("regex")  # Unicode classes; the plain-re checks above run without it
+        # ProviderName pattern and length from the AWS::Cognito::UserPoolIdentityProvider reference.
+        cognito = regex.compile(r"[^_\p{Z}][\p{L}\p{M}\p{S}\p{N}\p{P}][^_\p{Z}]+")
+        pattern = self.get_template()["Parameters"]["ExternalOidcProviderName"]["AllowedPattern"]
+
+        for name in self.PROVIDER_NAMES_ACCEPTED:
+            assert cognito.fullmatch(name) and len(name) <= 32, name
+        # Every name up to 5 characters over a mixed alphabet: ours accepts it only if Cognito does.
+        for length in range(1, 6):
+            for chars in itertools.product("aZ9_.- ", repeat=length):
+                name = "".join(chars)
+                if re.fullmatch(pattern, name):
+                    assert cognito.fullmatch(name), name
+
+    def test_option_is_off_by_default(self):
+        template = self.get_template()
+        assert template["Conditions"]["UseExternalOidc"] == {
+            "Fn::Not": [{"Fn::Equals": [{"Ref": "ExternalOidcIssuerUrl"}, ""]}]
+        }
+        assert template["Parameters"]["ExternalOidcIssuerUrl"]["Default"] == ""
+
+    def test_conditional_resources_keep_their_logical_ids(self):
+        resources = self.get_template()["Resources"]
+        for logical_id in self.CONDITIONAL_RESOURCES:
+            assert logical_id in resources, f"{logical_id} renamed or removed: existing stacks would lose it"
+            assert resources[logical_id]["Condition"] == "UseExternalOidc"
+
+    def test_identity_provider_uses_the_supplied_issuer_and_client(self):
+        resources = self.get_template()["Resources"]
+        props = resources["ExternalIdentityProvider"]["Properties"]
+        assert props["ProviderType"] == "OIDC"
+        assert props["ProviderName"] == {"Ref": "ExternalOidcProviderName"}
+        details = props["ProviderDetails"]
+        assert details["oidc_issuer"] == {"Ref": "ExternalOidcIssuerUrl"}
+        assert details["client_id"] == {"Ref": "ExternalOidcClientId"}
+        assert details["client_secret"] == {"Ref": "ExternalOidcClientSecret"}
+        # email is a required user pool attribute: the provider must be asked for it and map it
+        assert "email" in details["authorize_scopes"].split()
+        assert props["AttributeMapping"]["email"] == "email"
+        # the client-update custom resource adds the same provider the stack created
+        assert resources["ClientUpdate"]["Properties"]["ProviderName"] == {"Ref": "ExternalIdentityProvider"}
+
+    def test_issuer_requires_client_id_and_secret(self):
+        rule = self.get_template()["Rules"]["ExternalOidcRequiresClientCredentials"]
+        assert rule["RuleCondition"] == {"Fn::Not": [{"Fn::Equals": [{"Ref": "ExternalOidcIssuerUrl"}, ""]}]}
+        asserted = {a["Assert"]["Fn::Not"][0]["Fn::Equals"][0]["Ref"] for a in rule["Assertions"]}
+        assert asserted == {"ExternalOidcClientId", "ExternalOidcClientSecret"}
+
+    def test_no_hard_coded_identity_provider_host(self):
+        """Every URL host in the template is a placeholder, localhost or the pool's own Cognito domain."""
+        text = (INFRA_DIR / "cognito-user-pool-setup.yaml").read_text(encoding="utf-8")
+        hosts = set(re.findall(r"https?://([A-Za-z0-9$<][^/\s'\"]*)", text))
+        allowed = re.compile(
+            r"localhost(:\d+)?|[\w.-]*\.example\.com|<[^>]+>|\$\{DomainPrefix\}\.auth\.\$\{AWS::Region\}\.amazoncognito\.com"
+        )
+        unexpected = sorted(h for h in hosts if not allowed.fullmatch(h))
+        assert unexpected == [], f"hard-coded hosts in the user-pool template: {unexpected}"
+
+
+class TestCognitoUserPoolEmailChanges:
+    """A user of the pool cannot make a new email address active without verifying it.
+
+    Deployments can use the email claim as the user's identity. email is a required attribute of the
+    pool, and app clients must have write access to required attributes, so the control is
+    verification before update rather than removing email from WriteAttributes.
+    """
+
+    def get_template(self):
+        return load_infra_template("cognito-user-pool-setup.yaml")
+
+    def get_clients(self, template):
+        clients = {k: v for k, v in template["Resources"].items() if v["Type"] == "AWS::Cognito::UserPoolClient"}
+        assert set(clients) == {"UserPoolClient", "DistributionWebClient"}, "a new app client needs the same checks"
+        return clients
+
+    def test_email_change_requires_verification(self):
+        pool = self.get_template()["Resources"]["UserPool"]["Properties"]
+        assert pool["UserAttributeUpdateSettings"] == {"AttributesRequireVerificationBeforeUpdate": ["email"]}
+        # the verification code for a changed address is sent only for an auto-verified attribute
+        assert "email" in pool["AutoVerifiedAttributes"]
+
+    def test_clients_can_write_every_required_and_mapped_attribute(self):
+        template = self.get_template()
+        schema = template["Resources"]["UserPool"]["Properties"]["Schema"]
+        required = {a["Name"] for a in schema if a.get("Required")}
+        assert "email" in required
+        mapped = set(template["Resources"]["ExternalIdentityProvider"]["Properties"]["AttributeMapping"])
+        for logical_id, client in self.get_clients(template).items():
+            write = set(client["Properties"]["WriteAttributes"])
+            assert required <= write, f"{logical_id}: required but not writable: {sorted(required - write)}"
+            assert mapped <= write, f"{logical_id}: mapped but not writable: {sorted(mapped - write)}"
+
+    def test_no_client_can_write_a_verification_flag(self):
+        for logical_id, client in self.get_clients(self.get_template()).items():
+            assert not {"email_verified", "phone_number_verified"} & set(client["Properties"]["WriteAttributes"]), (
+                logical_id
+            )
+
+    def test_client_update_keeps_write_attributes(self):
+        """ClientUpdate re-sends the live client settings, and an omitted setting returns to its default
+        (write access to every standard attribute), so it must copy WriteAttributes."""
+        resources = self.get_template()["Resources"]
+        assert resources["ClientUpdate"]["Properties"]["ClientId"] == {"Ref": "UserPoolClient"}
+        code = resources["UpdateClientFunction"]["Properties"]["Code"]["ZipFile"]
+        assert "'WriteAttributes'" in code
 
 
 class TestAnalyticsPipelineIamHardening:

@@ -1,6 +1,6 @@
 # AWS Cognito User Pool Setup Guide
 
-This guide explains how to set up an AWS Cognito User Pool for use with Claude Code authentication. The User Pool can be used standalone or integrated with external identity providers like Amazon Federate/Midway.
+This guide explains how to set up an AWS Cognito User Pool for use with Claude Code authentication. The User Pool can be used on its own or with your own external OIDC identity provider.
 
 > Using a Cognito user pool as the identity provider for Claude Apps Gateway
 > instead? See [Amazon Cognito as the gateway identity provider](../APPS_GATEWAY.md#amazon-cognito-as-the-gateway-identity-provider).
@@ -89,13 +89,23 @@ poetry run gip deploy --type auth
 - `CallbackURLs`: OAuth2 callback URLs (default: http://localhost:8400/callback)
 - `LogoutURLs`: OAuth2 logout URLs (default: http://localhost:8400/logout)
 
-### Amazon Federate/Midway Parameters (Optional)
+### External OIDC Identity Provider Parameters (Optional)
 
-For Amazon internal use with Federate/Midway:
+Set these to let users sign in through your own OIDC identity provider as well as with
+Cognito user names. The option is off while `ExternalOidcIssuerUrl` is empty, which is the default.
 
-- `FederateEnvironment`: 'none', 'integ', or 'prod' (default: none)
-- `FederateClientId`: Client ID from Federate service profile
-- `FederateClientSecret`: Client secret from Federate service profile
+- `ExternalOidcIssuerUrl`: the provider's issuer URL, the `issuer` value of its
+  `/.well-known/openid-configuration` document (must start with `https://`)
+- `ExternalOidcClientId`: client ID of the app you register in the provider for this user pool; the
+  app must allow the `openid`, `email` and `profile` scopes, which the user pool requests
+- `ExternalOidcClientSecret`: client secret of that app (`NoEcho`)
+- `ExternalOidcProviderName`: name of the provider in the user pool (default `ExternalOIDC`), shown on
+  the managed login page; 3 to 32 letters, digits, dots or hyphens, starting and ending with a letter or
+  digit
+
+The stack refuses to create or update when `ExternalOidcIssuerUrl` is set without the client ID and
+secret. This option has no entry in [LIVE_VALIDATION.md](../LIVE_VALIDATION.md): the repository's
+live validation does not cover it, so test sign-in through your provider before you rely on it.
 
 ## User Pool Configuration
 
@@ -112,6 +122,10 @@ The template creates a User Pool with the following settings:
 - MFA optional (can be configured per user)
 - Token revocation enabled
 - Prevent user existence errors enabled
+- A changed email address takes effect only after the user confirms the code sent to it
+  (`UserAttributeUpdateSettings`); until then the original address stays active and in the tokens.
+  Deployments can use the email claim as the user's identity, so a user can't take over a
+  colleague's address. A user who controls a second address can still verify it and move to it.
 
 ### Token Validity
 - Authentication flow session: 3 minutes
@@ -143,36 +157,64 @@ aws cognito-idp admin-create-user \
   --temporary-password <temp-password>
 ```
 
+### Changing a User's Email Address
+
+An administrator changes it. Marking the new address as verified in the same call makes it active
+at once, without a code:
+
+```bash
+aws cognito-idp admin-update-user-attributes \
+  --user-pool-id <your-user-pool-id> \
+  --username <username> \
+  --user-attributes Name=email,Value=new@example.com Name=email_verified,Value=true
+```
+
+Without `email_verified`, Cognito sends a code to the new address and keeps the original one
+active until the user confirms it. For users who sign in through the external OIDC provider,
+change the address in the provider. Cognito's attribute-mapping documentation says that it updates
+mapped attributes from the provider when the user signs in, and that a mapped email address is
+unverified unless the provider's `email_verified` claim is mapped (this template doesn't map it).
+The documentation doesn't say how the verify-before-update setting applies to a mapped `email`, so
+check the user's attributes after their next sign-in.
+
 ## Integrating External Identity Providers
 
-### Amazon Federate/Midway (Amazon Internal)
+### Your OIDC Identity Provider
 
-If you deployed with Federate parameters, the integration is automatic. Otherwise:
-
-1. Create a Federate service profile at:
-   - Testing: https://integ.ep.federate.a2z.com/
-   - Production: https://prod.ep.federate.a2z.com/
-
-2. Configure the service profile:
-   - Protocol: OIDC
+1. Register an app in your identity provider for this user pool, as a confidential web client:
    - Redirect URI: `https://<domain-prefix>.auth.<region>.amazoncognito.com/oauth2/idpresponse`
-   - Claims: EMAIL, GIVEN_NAME, FAMILY_NAME
-   - Groups: Configure your LDAP/ANT/POSIX groups
+     (the stack output `IdpResponseEndpoint`)
+   - Scopes: `openid`, `email` and `profile`. Email is a required attribute of this user pool, so
+     the provider must release the `email` claim.
+   - Restrict which of your users may sign in (groups or app assignment) in the provider.
 
-3. In Cognito Console, add the identity provider:
-   - Type: OpenID Connect
-   - Provider name: midway
-   - Client ID/Secret: From Federate
-   - Issuer URL: https://idp.federate.amazon.com
-   - Attribute mappings as shown in template outputs
+2. Update the stack with the provider's values:
 
-### Other OIDC Providers
+   ```bash
+   aws cloudformation deploy \
+     --template-file deployment/infrastructure/cognito-user-pool-setup.yaml \
+     --stack-name gip-user-pool \
+     --capabilities CAPABILITY_IAM \
+     --parameter-overrides \
+       ExternalOidcIssuerUrl=https://login.example.com \
+       ExternalOidcClientId=<client-id> \
+       ExternalOidcClientSecret=<client-secret>
+   ```
 
-Similar process for Okta, Auth0, Azure AD:
-1. Configure the provider with redirect URI
-2. Add as OIDC identity provider in Cognito
-3. Map attributes appropriately
-4. Update app client supported identity providers
+   The stack creates the identity provider, maps the standard OIDC claims (`sub` to
+   `preferred_username`, and `email`, `given_name` and `family_name` to the attributes of the same
+   name), and adds the provider to both app clients. The `ExternalOidcSetupInstructions` output
+   repeats the redirect URI and the provider name.
+
+3. Sign in once through the managed login page with a user of your provider, and confirm the user
+   appears in the user pool with an email address.
+
+### Other Ways to Add a Provider
+
+You can also add an OpenID Connect provider to the user pool in the Cognito console, and then add it
+to the app clients' identity providers. A provider added that way is outside the stack, and a later
+stack update that changes an app client sets its identity providers back to the template's list, so
+prefer the parameters above.
 
 ## Troubleshooting
 
