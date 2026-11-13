@@ -301,14 +301,16 @@ def test_command_hook_still_blocks_when_the_log_override_is_unwritable(tmp_path)
     assert not (home / ".claude").exists()
 
 
-@needs_bash_and_jq
-def test_command_hook_still_blocks_when_stderr_is_closed(tmp_path):
-    home, project = tmp_path / "home", tmp_path / "project"
-    home.mkdir()
-    project.mkdir()
-    result = run_cmd(  # nosec B603
-        ["bash", "-c", 'bash "$0" 2>&-', str(COMMAND_HOOK)],
-        input=json.dumps({"tool_input": {"command": DANGEROUS}}),
+# stderr as the hook finds it when its messages can't be written: closed by the caller, or
+# open but not for writing (bash 5.2 leaves the script itself open on descriptor 2 when it
+# starts with stderr closed).
+unwritable_stderr = pytest.mark.parametrize("stderr", ["2>&-", "2</dev/null"], ids=["closed", "read-only"])
+
+
+def _run_command_hook_with_stderr(command: str, stderr: str, home: Path, project: Path):
+    return run_cmd(  # nosec B603
+        ["bash", "-c", f'bash "$0" {stderr}', str(COMMAND_HOOK)],
+        input=json.dumps({"tool_input": {"command": command}}),
         text=True,
         capture_output=True,
         env=_hook_env(home, project),
@@ -316,5 +318,29 @@ def test_command_hook_still_blocks_when_stderr_is_closed(tmp_path):
         check=False,
     )
 
+
+@needs_bash_and_jq
+@unwritable_stderr
+def test_command_hook_still_blocks_when_stderr_cannot_be_written(tmp_path, stderr):
+    home, project = tmp_path / "home", tmp_path / "project"
+    home.mkdir()
+    project.mkdir()
+    result = _run_command_hook_with_stderr(DANGEROUS, stderr, home, project)
+
     assert result.returncode == 2, result.stdout
     assert "DANGEROUS_COMMAND" in (home / ".claude" / "security-audit.log").read_text()
+
+
+@needs_bash_and_jq
+@unwritable_stderr
+def test_command_hook_passes_a_safe_command_when_stderr_cannot_be_written(tmp_path, stderr):
+    home, project = tmp_path / "home", tmp_path / "project"
+    home.mkdir()
+    project.mkdir()
+    result = _run_command_hook_with_stderr("ls -la", stderr, home, project)
+
+    assert result.returncode == 0, result.stdout
+    assert result.stdout == ""
+    log_lines = (home / ".claude" / "security-audit.log").read_text().splitlines()
+    assert len(log_lines) == 1, log_lines
+    assert log_lines[0].endswith('COMMAND_SECURITY_CHECK COMMAND_CHECK "ls -la" PASSED')

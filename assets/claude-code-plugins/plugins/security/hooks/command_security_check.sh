@@ -20,11 +20,6 @@ set -euo pipefail
 # Read Claude Code hook input from stdin
 INPUT_JSON=$(cat)
 
-# If stderr can't be written (closed by the caller), send it to /dev/null, so that a failed
-# message can't end the hook before its checks have run. (`>&2` is tried first, on the
-# inherited descriptor; the `2>/dev/null` after it only quiets bash's own error.)
-: >&2 2>/dev/null || exec 2>/dev/null
-
 # Extract command from hook input
 COMMAND=$(echo "$INPUT_JSON" | jq -r '.tool_input.command // empty')
 
@@ -36,6 +31,15 @@ if [ -z "$COMMAND" ]; then
     # No command to validate
     exit 0
 fi
+
+# Messages go to stderr. The first one also tests it: if it can't be written, the rest go
+# to /dev/null, so that a stderr that is unusable when the hook starts can't end the hook
+# before its checks have run.
+# A closed descriptor fails the `>&2`. One that is open but not for writing fails the write:
+# some versions of bash (5.2, for one) leave the script itself open on descriptor 2 when
+# they start with stderr closed. The subshell keeps a message that couldn't be written out
+# of this shell's output buffer, and the `2>/dev/null` only quiets bash's own error.
+(echo "Checking command security: $COMMAND") >&2 2>/dev/null || exec 2>/dev/null
 
 # Function to log security events.
 # The log lives in the user's home, not the project tree: a flagged command can carry a
@@ -287,8 +291,6 @@ check_network_security() {
 
 # Main security validation
 main() {
-    echo "Checking command security: $COMMAND" >&2
-    
     # Run all security checks
     check_dangerous_commands "$COMMAND"
     check_suspicious_operations "$COMMAND"
