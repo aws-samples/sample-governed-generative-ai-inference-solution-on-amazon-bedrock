@@ -701,46 +701,67 @@ class TestEndUserPutMetricDataNamespaceScoped:
         assert string_equals.get("aws:RequestedRegion") == {"Ref": "AllowedBedrockRegions"}
 
     def get_idc_statements(self):
+        """(condition, statement) pairs of the IDC stack's one policy; condition is None when unconditional.
+
+        The stack creates no role (users call Bedrock with permission-set credentials), so the
+        CloudWatch statements live in BedrockAccessPolicy, which the permission set references.
+        A conditional statement is !If [<condition>, <statement>, AWS::NoValue].
+        """
         template = load_infra_template("bedrock-auth-idc.yaml")
-        policies = template["Resources"]["BedrockIDCRole"]["Properties"]["Policies"]
-        # Policies is !If [MonitoringEnabled, [policy], []]
-        assert isinstance(policies, dict) and "Fn::If" in policies
-        policy_list = policies["Fn::If"][1]
-        assert policy_list[0]["PolicyName"] == "CloudWatchAccess"
-        return policy_list[0]["PolicyDocument"]["Statement"]
+        assert not [r for r in template["Resources"].values() if r["Type"] == "AWS::IAM::Role"]
+        statements = template["Resources"]["BedrockAccessPolicy"]["Properties"]["PolicyDocument"]["Statement"]
+        pairs = []
+        for item in statements:
+            if isinstance(item, dict) and "Fn::If" in item:
+                condition, statement, otherwise = item["Fn::If"]
+                assert otherwise == {"Ref": "AWS::NoValue"}, f"{condition}: the false branch must grant nothing"
+                pairs.append((condition, statement))
+            else:
+                pairs.append((None, item))
+        return pairs
 
     def test_idc_put_metric_data_is_namespace_scoped(self):
-        """Classic PutMetricData stays scoped to the usage namespaces. The one other
-        PutMetricData statement allows only namespace-less (OTLP) writes to the
-        account's OTLP dataset (see test_otlp_and_bearer_policy.py)."""
-        statements = []
-        for item in self.get_idc_statements():
-            # The OTLP statement sits under !If [SidecarOtlpIngest, <statement>, AWS::NoValue].
-            if isinstance(item, dict) and "Fn::If" in item and item["Fn::If"][0] == "SidecarOtlpIngest":
-                statements.append(item["Fn::If"][1])
-            elif isinstance(item, dict):
-                statements.append(item)
-        writes = [s for s in statements if "cloudwatch:PutMetricData" in s.get("Action", [])]
+        """Classic PutMetricData stays scoped to the usage namespaces, and only with monitoring on. The one other
+        PutMetricData statement allows only namespace-less (OTLP) writes to the account's OTLP dataset, and only
+        in sidecar mode (see test_otlp_and_bearer_policy.py)."""
+        writes = [(c, s) for c, s in self.get_idc_statements() if "cloudwatch:PutMetricData" in s.get("Action", [])]
         assert len(writes) == 2, "expected the namespace-scoped and the OTLP-dataset statements"
-        for write in writes:
+        for _condition, write in writes:
             assert write["Action"] == ["cloudwatch:PutMetricData"], (
                 "PutMetricData must not share a statement with unconditioned actions"
             )
-        classic = [w for w in writes if w.get("Resource") == "*"]
-        otlp = [w for w in writes if w.get("Resource") != "*"]
+        classic = [(c, w) for c, w in writes if w.get("Resource") == "*"]
+        otlp = [(c, w) for c, w in writes if w.get("Resource") != "*"]
         assert len(classic) == 1 and len(otlp) == 1
-        assert classic[0]["Condition"]["StringEquals"]["cloudwatch:namespace"] == USAGE_NAMESPACES
-        assert otlp[0]["Condition"] == {"Null": {"cloudwatch:namespace": "true"}}
-        assert ":dataset/default" in str(otlp[0]["Resource"])
+        assert classic[0][0] == "MonitoringEnabled"
+        assert classic[0][1]["Condition"]["StringEquals"]["cloudwatch:namespace"] == USAGE_NAMESPACES
+        assert otlp[0][0] == "SidecarOtlpIngest"
+        assert otlp[0][1]["Condition"] == {"Null": {"cloudwatch:namespace": "true"}}
+        assert ":dataset/default" in str(otlp[0][1]["Resource"])
 
     def test_idc_read_actions_remain_available(self):
-        """ListMetrics/GetMetricStatistics must keep working (ListMetrics without
+        """ListMetrics/GetMetricStatistics must keep working with monitoring on (ListMetrics without
         a Namespace filter would be denied by the namespace condition)."""
-        statements = self.get_idc_statements()
-        reads = [s for s in statements if "cloudwatch:ListMetrics" in s.get("Action", [])]
+        reads = [(c, s) for c, s in self.get_idc_statements() if "cloudwatch:ListMetrics" in s.get("Action", [])]
         assert len(reads) == 1
-        assert "cloudwatch:GetMetricStatistics" in reads[0]["Action"]
-        assert "cloudwatch:PutMetricData" not in reads[0]["Action"]
+        condition, read = reads[0]
+        assert condition == "MonitoringEnabled"
+        assert "cloudwatch:GetMetricStatistics" in read["Action"]
+        assert "cloudwatch:PutMetricData" not in read["Action"]
+
+    def test_idc_cloudwatch_statements_depend_on_monitoring(self):
+        """With EnableMonitoring=false the policy grants no CloudWatch or CloudWatch Logs action."""
+        template = load_infra_template("bedrock-auth-idc.yaml")
+        sidecar = template["Conditions"]["SidecarOtlpIngest"]
+        assert {"Condition": "MonitoringEnabled"} in sidecar["Fn::And"]
+        monitoring = [
+            (c, s)
+            for c, s in self.get_idc_statements()
+            if any(str(a).startswith(("cloudwatch:", "logs:")) for a in s.get("Action", []))
+        ]
+        assert len(monitoring) == 4, "expected logs, namespace-scoped metrics, OTLP metrics and metric reads"
+        for condition, statement in monitoring:
+            assert condition in ("MonitoringEnabled", "SidecarOtlpIngest"), statement.get("Sid")
 
 
 class TestSecretStoreRoleScoped:

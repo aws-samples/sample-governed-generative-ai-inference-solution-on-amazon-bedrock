@@ -13,6 +13,106 @@ Changes on this fork relative to upstream `beta`.
 
 ### Changed
 
+- **`gip deploy` refuses server-side metering in `max` mode when it cannot
+  attribute usage to a user.** The metering processor names a user only for IAM
+  Identity Center sessions and for Direct STS sessions bound to the `email`
+  claim. Binding `none` lets the client choose its session name, binding `sub`
+  yields a name the quota API never reads (usage lands under
+  `UNATTRIBUTED#<role>`), and Cognito identity pool sessions carry no user. With
+  `metering_enabled` and `metering_mode: max`, `gip deploy` (a full deploy, or
+  the `auth`, `quota` or `metering` stack, `--dry-run` and `--show-commands`
+  included) now stops before any CloudFormation call for those profiles and exits 1; in `shadow` mode it
+  prints a notice and continues. For an OIDC profile that passes, a run that
+  deploys the `quota` or `metering` stack in `max` mode without the `auth` stack
+  also reads the deployed auth stack, and stops unless its `SessionNameBinding`
+  is `email` and its `FederationType` is `direct`, or when it can't read the
+  stack or the stack's status doesn't end in `_COMPLETE`. For a profile on the
+  sample's Cognito user pool, `max` mode also
+  prints a notice that a user can move to another email address they own,
+  which starts a usage row at zero, so every limit starts again
+  (`QUOTA_MONITORING.md`, Identity Caveats).
+  Upgrade: a Direct STS profile that runs `max` with binding `none`
+  sets `session_name_binding: email` in the profile, runs `gip package` and
+  distributes the new clients, then runs `gip deploy` (`COST_ATTRIBUTION.md`,
+  "Binding session names to the token claim", migration step 3), or switches
+  `metering_mode` to `shadow`. Leaving `sub` has no update-safe order, because
+  the trust policy accepts one claim at a time. The metering docs now say
+  `SessionNameBinding=email` where they said `email|sub`; `sub` stays correct for
+  CUR attribution and the per-user deny.
+- **Every group policy of a user is enforced.** When a user belongs to
+  several groups with policies, `quota_check` applied only the one with the
+  lowest limit, so a blocking limit in any other group did not apply; a user
+  in a `block` group and in an alert-only group with a lower limit was never
+  blocked. It now evaluates each enabled group policy on its own and denies
+  when any one of them would deny. When none denies, the response names the
+  lowest-limit group policy, as before. `gip quota show` names the same policy
+  and lists every group policy it checks; it and `quota_monitor` now order
+  mixed token and cost policies as `quota_check` does. Threshold alerts from
+  `quota_monitor` never follow group policies, because usage records carry no
+  groups: with fine-grained quotas they use the user policy, else the default
+  policy, so a user whose only policies are group policies gets no threshold
+  alert; without fine-grained quotas they use the deployment's limits.
+  Upgrade: redeploy the quota stack
+  (`gip deploy quota`). A user in several groups is now blocked by any
+  blocking limit among them.
+- **Server-side metering attributes usage only to sessions of roles the
+  deployment names.** The metering processor used to map any assumed-role
+  session whose name contains `@` to that address, whatever the role, so any
+  Bedrock-capable role whose caller picks its session name could charge usage to
+  another user. `quota-metering.yaml` has a new `AttributedRoles` parameter
+  (comma-separated role names; an entry may end in `*` to match a name prefix)
+  and passes it to the processor as `ATTRIBUTED_ROLES`; sessions of any other
+  role are metered under `UNATTRIBUTED#<role>`. The processor names a user only
+  when `identity.arn` is, in full, an STS assumed-role session ARN; anything
+  else, such as an IAM user ARN whose path contains assumed-role text, is
+  metered under `UNATTRIBUTED#unknown`. `gip deploy metering` builds the
+  list from the auth stack's federated role for OIDC, or `AWSReservedSSO_*`
+  (every IAM Identity Center role) for IAM Identity Center, plus the new profile
+  field `metering_attributed_roles`. For OIDC it stops, whatever the profile
+  lists, when it can't read the auth stack's federated role output or, for
+  Direct STS, the profile's saved `federated_role_arn` names a different role,
+  and it stops if
+  it can't name any role. The IAM Identity Center rule is now the name prefix
+  `AWSReservedSSO_`, where it was any role name containing `AWSReservedSSO`.
+  Upgrade: run
+  `gip deploy metering` after `gip deploy auth`. Claude Apps Gateway usage
+  through `assume_role` reaches a user's row only when the gateway's role is
+  listed in `metering_attributed_roles` in the profile JSON. `AttributedRoles`
+  has no default, so the first hand-run update of an existing metering stack
+  after the upgrade must pass it, or CloudFormation rejects the update before
+  changing anything; later, `aws cloudformation deploy` keeps the previous
+  value when it is omitted.
+- **The quota API's IAM route names a user only for IAM Identity Center
+  sessions.** On deployments without an OIDC issuer, `quota_check` took the
+  last segment of any SigV4 caller's ARN as the user when it contained `@`, or
+  when the ARN contained `AWSReservedSSO` anywhere. A principal allowed to call
+  the API that picks its own session name could therefore read another user's
+  quota record and allow or deny decision. It now reads only
+  `requestContext.authorizer.iam.userArn` and names a user only when that ARN
+  is, in full, an STS assumed-role session ARN of a role whose name starts with
+  `AWSReservedSSO_`, by its session name; any other caller gets
+  `missing_identity` and is denied. The
+  response's `unblock_status` no longer carries `unblocked_by` or `reason`
+  (`gip quota unblock` still records both). Upgrade: redeploy the quota stack
+  (`gip deploy quota`). A check signed with credentials other than an IAM
+  Identity Center permission set's, for example through `QuotaApiInvokePolicy`
+  attached to another role, is now denied.
+- **IAM: `bedrock-auth-idc.yaml` no longer creates `BedrockIDCRole`.** IAM
+  Identity Center users call Bedrock with their permission set's credentials,
+  and nothing in this sample assumed the role. The stack now creates only its
+  Bedrock access policy, which also carries the CloudWatch statements the role
+  used to hold inline, and `gip deploy auth` prints the one-time step that
+  attaches the policy to the permission set as a customer managed policy
+  reference, so the model allow-list and the Mantle deny reach IAM Identity
+  Center users. The `FederatedRoleName` and `AllowedPermissionSetName`
+  parameters and the `RoleArn` and `RoleName` outputs are gone; a new
+  `PolicyName` output names the policy. Upgrade: the next `gip deploy auth`
+  deletes the role (it needs `iam:DeleteRole`, `iam:DetachRolePolicy` and
+  `iam:DeleteRolePolicy`). An update fails and rolls back if another stack
+  imports the `<stack>-RoleArn` or `<stack>-RoleName` export, and anything that
+  assumed the role by hand loses access. After the update, attach the policy
+  (`assets/docs/providers/iam-identity-center-setup.md`, step 6) and remove any
+  broader Bedrock allow from the permission set.
 - **Cognito user pool: the optional external identity provider takes your own
   OIDC issuer.** `cognito-user-pool-setup.yaml` replaces the three earlier
   parameters of its external identity-provider option with

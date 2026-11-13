@@ -662,13 +662,16 @@ resources and IAM/SCP pre-clearance.
 | Resource Type | Service Namespace | Count |
 |---|---|---|
 | `AWS::IAM::ManagedPolicy` | `iam` | 1 |
-| `AWS::IAM::Role` | `iam` | 1 |
 
-IAM Identity Center handles user authentication, while this stack provisions
-the Bedrock access policy and federated IAM role used by IDC sessions.
+IAM Identity Center handles user authentication and issues the permission
+set's role credentials. This stack provisions only the Bedrock access policy,
+which the permission set references as a customer managed policy
+(see [IAM Identity Center setup](providers/iam-identity-center-setup.md), step 6).
 
 **IAM actions required for deployment:**
-- `iam:CreatePolicy`, `iam:CreateRole`, `iam:AttachRolePolicy`, `iam:PutRolePolicy`
+- `iam:CreatePolicy`, `iam:CreatePolicyVersion`, `iam:DeletePolicyVersion`
+- Updating a stack created before the role was removed also needs
+  `iam:DetachRolePolicy`, `iam:DeleteRolePolicy` and `iam:DeleteRole`
 
 ---
 

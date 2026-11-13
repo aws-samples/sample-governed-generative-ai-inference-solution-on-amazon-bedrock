@@ -92,7 +92,8 @@ triggers, because nothing *errors* ([RUNBOOKS.md §2](RUNBOOKS.md#2-otel-collect
 but usage during the window is under-counted with no reconciliation step.
 
 **Closing it:** deploy [server-side metering](QUOTA_MONITORING.md#server-side-metering-tamper-proof-usage)
-with `MeteringMode=max`. Server figures accrue from Bedrock invocation logs,
+with `MeteringMode=max` and, for Direct STS, `SessionNameBinding=email` (without
+it, `gip deploy` refuses `max`). Server figures accrue from Bedrock invocation logs,
 independent of the collector, so collector outages stop creating a silent
 enforcement gap in metered regions. Invalid invocation records can still delay
 accrual, but they now produce an alarm and remain replayable because validation
@@ -112,7 +113,10 @@ client and server figures.
 
 **Closing it:** for enforcement that must resist this, use central mode, where
 the collector takes `user.email` from the ALB-validated JWT, with
-[server-side metering](QUOTA_MONITORING.md#server-side-metering-tamper-proof-usage).
+[server-side metering](QUOTA_MONITORING.md#server-side-metering-tamper-proof-usage)
+and `SessionNameBinding=email`. Without binding, the session name that metering
+keys on is client-asserted, so a user can charge server-measured usage to a
+colleague too.
 Central mode doesn't grant the direct dataset write: the auth templates
 allow `AllowCloudWatchOtlpMetrics` only when `MonitoringMode=sidecar`, which
 `gip deploy` sets from the profile, so users can't post telemetry around the

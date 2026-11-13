@@ -34,7 +34,7 @@ The developer bundle depends on whether quota monitoring is enabled:
 
 ⚠️ **Differences from OIDC:**
 
-1. **Quota via SigV4**: Per-user quota enforcement works via IAM SigV4 authentication (not JWT). The quota Lambda extracts user email from the assumed-role ARN session name. Requires the quota-monitoring stack to be deployed, and switches the developer bundle from collector-only to collector plus credential-process (see [How It Works](#how-it-works)).
+1. **Quota via SigV4**: Per-user quota enforcement works via IAM SigV4 authentication (not JWT). The quota Lambda takes the user from the session name of the IAM Identity Center role (`AWSReservedSSO_…`) that signs the check; a request signed by any other role or IAM user is denied. Requires the quota-monitoring stack to be deployed, and switches the developer bundle from collector-only to collector plus credential-process (see [How It Works](#how-it-works)).
 2. **Per-User OTEL Attribution**: Works automatically — credential-process writes user email to the OTEL cache from the STS caller ARN. Requires email as the IDC session name (the default).
 3. **No ALB JWT Authorization**: The OTEL proxy (central mode) cannot validate requests via JWT. Use sidecar mode, or accept unauthenticated OTEL ingestion in proxy mode.
 
@@ -43,7 +43,7 @@ The developer bundle depends on whether quota monitoring is enabled:
 Before starting, ensure you have:
 
 - AWS IAM Identity Center enabled in your AWS account
-- A permission set created with appropriate Bedrock access (recommended: `BedrockDeveloperAccess`)
+- A permission set for developers (recommended name: `BedrockDeveloperAccess`). Its Bedrock access comes from the policy that `gip deploy` creates ([step 6](#6-attach-the-bedrock-access-policy-to-the-permission-set)).
 - Users assigned to the permission set
 - AWS CLI v2 installed and configured
 
@@ -112,8 +112,24 @@ poetry run gip deploy
 
 This will:
 - Deploy the quota monitoring stack when quota enforcement is enabled (skipped when it is not)
-- Deploy the IAM role and Bedrock access policy
+- Deploy the Bedrock access policy, `<identity_pool_name>-BedrockAccessPolicy` (the stack creates no IAM role: users call Bedrock with their permission set's credentials)
 - Deploy monitoring and dashboard stacks (if enabled)
+
+### 6. Attach the Bedrock access policy to the permission set
+
+The auth stack's policy holds the model allow-list (`RestrictToAnthropicModels`, `allow_openai_models`), the Region scope (`allowed_bedrock_regions`), the Mantle deny, the Claude Desktop bearer-token statement and the monitoring statements. It reaches your users only when the permission set references it. Do this once, after the auth stack exists in every account the permission set is assigned to: IAM Identity Center fails to assign a permission set whose customer managed policy is missing in an account ([Use IAM policies in permission sets](https://docs.aws.amazon.com/singlesignon/latest/userguide/howtocmp.html)). `gip deploy auth` prints these commands with your policy name. Run them with credentials for the IAM Identity Center management or delegated administrator account:
+
+```bash
+aws sso-admin attach-customer-managed-policy-reference-to-permission-set \
+  --instance-arn <INSTANCE_ARN> --permission-set-arn <PERMISSION_SET_ARN> \
+  --customer-managed-policy-reference Name=<identity_pool_name>-BedrockAccessPolicy,Path=/
+aws sso-admin provision-permission-set --instance-arn <INSTANCE_ARN> \
+  --permission-set-arn <PERMISSION_SET_ARN> --target-type ALL_PROVISIONED_ACCOUNTS
+```
+
+Or, in the IAM Identity Center console, open the permission set, add the policy name under **Customer managed policies**, and re-provision it.
+
+Then remove any broader Bedrock allow from the permission set, such as the `bedrock:InvokeModel*` on `*` example under [Permission Set Configuration](#permission-set-configuration). IAM allows what any attached policy allows, so a broader allow overrides the policy's model allow-list; the deny statements apply either way. Later `gip deploy auth` runs update the policy in place, and the permission set picks up the change without another step. This flow has not been live-tested.
 
 ## Extending SSO Session Duration
 
@@ -220,21 +236,24 @@ Use the user identity from CloudTrail to create cost allocation reports and usag
    aws sts get-caller-identity --profile gip
    ```
 
-### IAM Role Trust Policy Issues
+### Bedrock Access Policy Not Applied
 
-If you encounter trust policy errors, verify the CloudFormation template deployed correctly:
+If users can call models the policy should deny, or can't call models it allows, check that the policy exists in the account and that the permission set references it:
 
 ```bash
-# Check the federated role
-aws iam get-role --role-name BedrockIDCFederatedRole
+# The policy the auth stack created (stack output PolicyArn)
+aws iam get-policy --policy-arn <POLICY_ARN>
 
-# Verify trust policy allows SSO principals
-aws iam get-role --role-name BedrockIDCFederatedRole --query 'Role.AssumeRolePolicyDocument'
+# In the IAM Identity Center administrator account: the permission set's references
+aws sso-admin list-customer-managed-policy-references-in-permission-set \
+  --instance-arn <INSTANCE_ARN> --permission-set-arn <PERMISSION_SET_ARN>
 ```
+
+Earlier versions of `bedrock-auth-idc.yaml` also created a role (`BedrockIDCFederatedRole` by default) that nothing in this sample assumed. The next `gip deploy auth` deletes it.
 
 ### Permission Set Configuration
 
-Ensure your Identity Center permission set includes:
+Use the customer managed policy from [step 6](#6-attach-the-bedrock-access-policy-to-the-permission-set). If you give the permission set an inline policy instead, it decides what users can call. A minimal one, with no model allow-list or Region scope, is:
 
 ```json
 {
@@ -255,7 +274,7 @@ Ensure your Identity Center permission set includes:
 
 #### Sidecar telemetry and Claude Desktop
 
-For IAM Identity Center profiles, credential-process returns the permission set's role credentials directly. It does not assume the `BedrockIDCRole` that `bedrock-auth-idc.yaml` creates, so the statements that role carries for sidecar telemetry and Claude Desktop do not apply at run time. Add them to the permission set's inline policy as well:
+For IAM Identity Center profiles, credential-process returns the permission set's role credentials directly. The policy from [step 6](#6-attach-the-bedrock-access-policy-to-the-permission-set) carries the statements for sidecar telemetry and Claude Desktop (the OTLP statement only when `MonitoringMode=sidecar`). With an inline policy instead, add them to it:
 
 - `AllowCloudWatchOtlpMetrics` lets the sidecar collector export OTLP metrics. Without it CloudWatch rejects the export with HTTP 403 (`not authorized to perform: cloudwatch:PutMetricData`). Add it only for sidecar monitoring: it lets the user write metrics under any identity (see [Quota Monitoring](../QUOTA_MONITORING.md#current-limitations)).
 - `AllowBedrockShortTermBearerToken` lets Claude Desktop use the short-term Amazon Bedrock API key that `credential-process --desktop` returns.
@@ -290,7 +309,7 @@ The OTLP grant lets any user of the permission set write metrics under any ident
 
 #### ChatGPT Work and Codex (OpenAI models)
 
-`allow_openai_models: true` adds `AllowOpenAIInvokeRegional` and `AllowOpenAIInvokeGlobal` to the policy of `BedrockIDCRole` ([ADR-0037](../adr/0037-openai-models-on-bedrock-runtime.md)). For the same reason as above, that does not change what IAM Identity Center users can call: the permission set decides. A permission set with the broad `bedrock:InvokeModel*` on `*` example above already allows OpenAI models; a narrower permission set needs the two statements below, which are the statements of the same names in `bedrock-auth-okta.yaml`. Use the same placeholders as above. They were live-tested with generic OIDC federation, not with IAM Identity Center.
+`allow_openai_models: true` adds `AllowOpenAIInvokeRegional` and `AllowOpenAIInvokeGlobal` to the stack's Bedrock access policy ([ADR-0037](../adr/0037-openai-models-on-bedrock-runtime.md)), so a permission set that references it ([step 6](#6-attach-the-bedrock-access-policy-to-the-permission-set)) gets them at the next `gip deploy auth`. With an inline policy instead, the permission set decides: the broad `bedrock:InvokeModel*` on `*` example above already allows OpenAI models; a narrower inline policy needs the two statements below, which are the statements of the same names in `bedrock-auth-okta.yaml`. Use the same placeholders as above. They were live-tested with generic OIDC federation, not with IAM Identity Center.
 
 ```json
 {
@@ -314,7 +333,7 @@ The OTLP grant lets any user of the permission set write metrics under any ident
 }
 ```
 
-The same applies to `DenyBedrockMantleEndpoint`, the statement that keeps ChatGPT Work and Codex off the Mantle (`bedrock-mantle`) endpoint, which writes no invocation logs ([ADR-0022](../adr/0022-mantle-metering-deferred-tripwire.md)). It is part of `BedrockIDCRole`'s policy, so it does not apply to IAM Identity Center users either. The example permission set above allows no `bedrock-mantle` actions, so Mantle is denied by default. Add the explicit deny so it stays denied if the permission set is broadened later, for example with the AWS managed policy `AmazonBedrockFullAccess`, which allows `bedrock-mantle:*` (SCP-2 in the [multi-account guide](../MULTI_ACCOUNT.md#scp-2-deny-bedrock-mantle-org-wide-unmeterable-endpoint) denies Mantle organization-wide):
+The same applies to `DenyBedrockMantleEndpoint`, the statement that keeps ChatGPT Work and Codex off the Mantle (`bedrock-mantle`) endpoint, which writes no invocation logs ([ADR-0022](../adr/0022-mantle-metering-deferred-tripwire.md)). It is part of the stack's Bedrock access policy, so it applies once the permission set references that policy. With an inline policy instead: the example permission set above allows no `bedrock-mantle` actions, so Mantle is denied by default. Add the explicit deny so it stays denied if the permission set is broadened later, for example with the AWS managed policy `AmazonBedrockFullAccess`, which allows `bedrock-mantle:*` (SCP-2 in the [multi-account guide](../MULTI_ACCOUNT.md#scp-2-deny-bedrock-mantle-org-wide-unmeterable-endpoint) denies Mantle organization-wide):
 
 ```json
 {

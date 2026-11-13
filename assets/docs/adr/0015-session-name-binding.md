@@ -35,7 +35,7 @@ fail closed with an actionable error on missing/invalid claims.
 | Provider | Condition-key prefix | `email` | `sub` |
 |---|---|---|---|
 | Okta | `<OktaDomain>` | ✅ | ✅ |
-| Azure | `login.microsoftonline.com/<tenant>/v2.0` | ⚠️ claim absent for some Entra configs/guests → fail-closed; prefer `sub` | ✅ |
+| Azure | `login.microsoftonline.com/<tenant>/v2.0` | ⚠️ for members of the tenant, `email` is in the token only when it is requested as an optional claim (or, on v2.0 only, with the OpenID scope); without it the credential process fails closed. Microsoft documents the claim as unverified and mutable, so per-user server metering on it is only as strong as the tenant's control of the mail attribute. `sub` is stable but metering cannot attribute it (see Consequences) | ✅ |
 | Auth0 | `<Auth0Domain>` | ✅ | ❌ `auth0\|…` contains `\|`, illegal in session names — AllowedValues restricted to `none\|email` |
 | Google | `accounts.google.com` | ✅ (documented AWS example) | ✅ |
 | Generic | issuer URL minus scheme | ⚠️ verify token carries claim | ⚠️ verify charset |
@@ -65,6 +65,11 @@ fail closed with an actionable error on missing/invalid claims.
   order documented in COST_ATTRIBUTION.md.
 - Case-sensitive `StringEquals` and email churn can split CUR rows (no
   lockout); `sub` mode is immune.
+- Server-side metering maps a session to a user only when the session name is
+  an email, so `sub`-bound sessions are metered under `UNATTRIBUTED#<role>`.
+  `gip deploy` therefore refuses `metering_mode: max` for Direct STS unless
+  binding is `email`; `sub` stays correct for CUR attribution and the per-user
+  deny.
 - Auth0 trailing-slash provider URL (R7 risk R5): the condition-key prefix
   assumes the stored IAM provider name is the domain without trailing slash —
   verify against `aws iam list-open-id-connect-providers` on first live

@@ -143,6 +143,11 @@ class Profile:
     # Pass AdoptExistingConfig=true to quota-metering.yaml: attach to an existing
     # metadata-only invocation-logging configuration instead of failing closed.
     metering_adopt_existing_config: bool = False
+    # Extra IAM role names whose session names metering maps to a user, besides the
+    # auth stack's federated role (or, for IAM Identity Center, every Identity Center
+    # role, AWSReservedSSO_*), e.g. a Claude Apps Gateway assume_role role.
+    # A trailing '*' matches a name prefix. Not set by the wizard; edit the profile JSON.
+    metering_attributed_roles: list[str] = field(default_factory=list)
 
     # Model lifecycle alerts (model-lifecycle stack, opt-in, default off, ~$0/mo).
     # Daily Lambda joins ListFoundationModels lifecycle dates against the models

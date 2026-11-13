@@ -64,6 +64,17 @@ def _parse_tokens(value: str | int) -> int:
     return int(value)
 
 
+def _policy_limit_sort_key(policy: QuotaPolicy) -> tuple[float, float]:
+    """Order group policies as the quota_check Lambda does for the policy it reports: the
+    lowest primary limit (cost in cost mode, tokens otherwise), then the other limit.
+    """
+    monthly_cost = float(policy.monthly_cost_limit or 0)
+    monthly_tokens = float(policy.monthly_token_limit or 0)
+    if policy.quota_mode == QuotaMode.COST:
+        return (monthly_cost if monthly_cost > 0 else float("inf"), monthly_tokens or float("inf"))
+    return (monthly_tokens if monthly_tokens > 0 else float("inf"), monthly_cost or float("inf"))
+
+
 class QuotaPolicyError(Exception):
     """Base exception for quota policy operations."""
 
@@ -399,9 +410,12 @@ class QuotaPolicyManager:
         return policies
 
     def resolve_quota_for_user(self, email: str, groups: list[str] | None = None) -> QuotaPolicy | None:
-        """Resolve the effective quota policy for a user.
+        """Resolve the quota policy reported for a user.
 
-        Precedence: user-specific > group (most restrictive) > default
+        Precedence: user-specific > group > default. With several enabled group
+        policies, the quota_check Lambda checks each of them and denies when any one
+        would deny; this returns the one it reports when none denies, the group policy
+        with the lowest limit (see resolve_group_policies for all of them).
 
         Args:
             email: User's email address.
@@ -415,24 +429,10 @@ class QuotaPolicyManager:
         if user_policy and user_policy.enabled:
             return user_policy
 
-        # 2. Check for group policies (apply most restrictive)
-        if groups:
-            group_policies = []
-            for group in groups:
-                group_policy = self.get_policy(PolicyType.GROUP, group)
-                if group_policy and group_policy.enabled:
-                    group_policies.append(group_policy)
-
-            if group_policies:
-                return min(
-                    group_policies,
-                    key=lambda p: (
-                        p.monthly_cost_limit
-                        if p.quota_mode == QuotaMode.COST and p.monthly_cost_limit
-                        else float("inf"),
-                        p.monthly_token_limit if p.monthly_token_limit > 0 else float("inf"),
-                    ),
-                )
+        # 2. Group policies: report the lowest-limit one (each is enforced)
+        group_policies = self.resolve_group_policies(groups)
+        if group_policies:
+            return min(group_policies, key=_policy_limit_sort_key)
 
         # 3. Fall back to default policy
         default_policy = self.get_policy(PolicyType.DEFAULT, "default")
@@ -441,6 +441,19 @@ class QuotaPolicyManager:
 
         # 4. No policy = unlimited (quota monitoring disabled for this user)
         return None
+
+    def resolve_group_policies(self, groups: list[str] | None) -> list[QuotaPolicy]:
+        """Return the enabled group policies for ``groups``, in groups order.
+
+        When no user policy applies, the quota_check Lambda checks each of these and
+        denies when any one of them, evaluated alone, would deny.
+        """
+        group_policies = []
+        for group in groups or []:
+            group_policy = self.get_policy(PolicyType.GROUP, group)
+            if group_policy and group_policy.enabled:
+                group_policies.append(group_policy)
+        return group_policies
 
     def get_usage_summary(
         self,

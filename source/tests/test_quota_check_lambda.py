@@ -560,7 +560,7 @@ class TestFailModeValidation:
     )
     def test_supported_error_modes(self, base_env, mode, expected_allowed):
         mod = _load_quota_check({**base_env, "ERROR_HANDLING_MODE": mode})
-        mod.resolve_quota_for_user = MagicMock(side_effect=RuntimeError("private detail"))
+        mod.resolve_policies_for_user = MagicMock(side_effect=RuntimeError("private detail"))
 
         body = _parse(mod.lambda_handler(_build_event(), None))
 
@@ -570,7 +570,7 @@ class TestFailModeValidation:
     def test_invalid_error_mode_logs_and_fails_closed(self, base_env, capsys):
         mod = _load_quota_check({**base_env, "ERROR_HANDLING_MODE": "fail-closed"})
         startup_output = capsys.readouterr().out
-        mod.resolve_quota_for_user = MagicMock(side_effect=RuntimeError("private detail"))
+        mod.resolve_policies_for_user = MagicMock(side_effect=RuntimeError("private detail"))
 
         body = _parse(mod.lambda_handler(_build_event(), None))
 
@@ -601,9 +601,11 @@ class TestIdcUsernameIdentity:
         mod = _load_quota_check(base_env)
         event = {
             "requestContext": {
-                "authorizer": {"jwt": {"claims": {}}},
-                "identity": {
-                    "caller": "arn:aws:sts::123456789012:assumed-role/AWSReservedSSO_BedrockDeveloper_abc123/user@company.com"
+                "authorizer": {
+                    "jwt": {"claims": {}},
+                    "iam": {
+                        "userArn": "arn:aws:sts::123456789012:assumed-role/AWSReservedSSO_BedrockDeveloper_abc123/user@company.com"
+                    },
                 },
             }
         }
@@ -616,9 +618,11 @@ class TestIdcUsernameIdentity:
         mod = _load_quota_check(base_env)
         event = {
             "requestContext": {
-                "authorizer": {"jwt": {"claims": {}}},
-                "identity": {
-                    "caller": "arn:aws:sts::123456789012:assumed-role/AWSReservedSSO_BedrockDeveloper_abc123/akshaya.claude"
+                "authorizer": {
+                    "jwt": {"claims": {}},
+                    "iam": {
+                        "userArn": "arn:aws:sts::123456789012:assumed-role/AWSReservedSSO_BedrockDeveloper_abc123/akshaya.claude"
+                    },
                 },
             }
         }
@@ -632,8 +636,10 @@ class TestIdcUsernameIdentity:
         mod = _load_quota_check(env)
         event = {
             "requestContext": {
-                "authorizer": {"jwt": {"claims": {}}},
-                "identity": {"caller": "arn:aws:sts::123456789012:assumed-role/CustomRole/session123"},
+                "authorizer": {
+                    "jwt": {"claims": {}},
+                    "iam": {"userArn": "arn:aws:sts::123456789012:assumed-role/CustomRole/session123"},
+                },
             }
         }
         body = _parse(mod.lambda_handler(event, None))
@@ -1100,3 +1106,12 @@ class TestInfrastructureFailureEnforcement:
         body = _parse(mod.lambda_handler(_build_event(), None))
         assert body["allowed"] is True
         assert body["reason"] == "within_quota"
+
+    def test_unblock_lookup_failure_returns_no_error_text(self, base_env, capsys):
+        """The exception's text goes to the log only, never into the returned status."""
+        mod = self._make_env_module(base_env, "fail_closed")
+        mod.quota_table = MagicMock()
+        mod.quota_table.get_item.side_effect = self._throttle()
+
+        assert mod.get_unblock_status("user@example.com") == {"is_unblocked": False}
+        assert "Error checking unblock status for user@example.com" in capsys.readouterr().out

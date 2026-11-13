@@ -219,8 +219,6 @@ class TestIdcCfnTemplate:
             template_content = f.read()
 
         required_params = [
-            "FederatedRoleName",
-            "AllowedPermissionSetName",
             "IdentityPoolName",
             "AllowedBedrockRegions",
             "EnableMonitoring",
@@ -229,15 +227,24 @@ class TestIdcCfnTemplate:
         for param in required_params:
             assert param in template_content, f"Required parameter {param} not found in template"
 
-    def test_trust_is_scoped_to_named_permission_set(self):
+    def test_template_creates_no_role(self):
+        """IAM Identity Center users call Bedrock with their permission set's credentials. A role
+        here would be unused, and its caller would choose its session name, which metering reads
+        as the user. The permission-set scoping now lives in metering's AttributedRoles prefix."""
         from pathlib import Path
 
-        template_path = Path(__file__).parent.parent.parent / "deployment" / "infrastructure" / "bedrock-auth-idc.yaml"
-        content = template_path.read_text(encoding="utf-8")
+        import yaml
 
-        assert "Service: 'sso.amazonaws.com'" not in content
-        assert "AWSReservedSSO_${AllowedPermissionSetName}_*" in content
-        assert "role/aws-reserved/sso.amazonaws.com/*'" not in content
+        from tests.test_otlp_and_bearer_policy import CFLoader
+
+        template_path = Path(__file__).parent.parent.parent / "deployment" / "infrastructure" / "bedrock-auth-idc.yaml"
+        with template_path.open(encoding="utf-8") as f:
+            template = yaml.load(f, Loader=CFLoader)  # nosec B506
+
+        assert [r["Type"] for r in template["Resources"].values()] == ["AWS::IAM::ManagedPolicy"]
+        for removed in ("FederatedRoleName", "AllowedPermissionSetName"):
+            assert removed not in template["Parameters"], removed
+        assert "BedrockIDCRole" not in template_path.read_text(encoding="utf-8")
 
     def test_template_has_required_outputs(self):
         """Test that the template has all required outputs."""
@@ -248,10 +255,12 @@ class TestIdcCfnTemplate:
         with open(template_path) as f:
             template_content = f.read()
 
-        required_outputs = ["RoleArn", "PolicyArn", "RoleName"]
+        required_outputs = ["PolicyArn", "PolicyName"]
 
         for output in required_outputs:
             assert output in template_content, f"Required output {output} not found in template"
+        for removed in ("RoleArn:", "RoleName:"):
+            assert f"\n  {removed}" not in template_content, f"Output {removed} belongs to the removed role"
 
     def test_cfn_lint_passes(self):
         """Test that cfn-lint passes on the template if available."""
@@ -278,7 +287,7 @@ class TestIdcCfnTemplate:
             pytest.skip(f"Could not run cfn-lint: {e}")
 
 
-class TestIdcDeployRoleCompatibility:
+class TestIdcDeployParams:
     @staticmethod
     def _profile() -> Profile:
         return Profile(
@@ -295,39 +304,48 @@ class TestIdcDeployRoleCompatibility:
             idc_permission_set_name="BedrockDeveloperAccess",
         )
 
-    def test_update_preserves_existing_federated_role_name(self):
+    @staticmethod
+    def _deploy(success: bool):
         manager = Mock()
         manager.get_stack_parameters.return_value = {"FederatedRoleName": "ExistingFederatedRole"}
-        manager.deploy_stack.return_value = Mock(success=True, error=None)
-
-        assert DeployCommand()._deploy_stack("auth", self._profile(), Console(), manager) == 0
-
+        manager.deploy_stack.return_value = Mock(success=success, error=None if success else "boom")
+        console = Console(record=True, width=400)
+        rc = DeployCommand()._deploy_stack("auth", TestIdcDeployParams._profile(), console, manager)
         parameters = {
             item["ParameterKey"]: item["ParameterValue"] for item in manager.deploy_stack.call_args.kwargs["parameters"]
         }
-        assert parameters["FederatedRoleName"] == "ExistingFederatedRole"
-        assert parameters["AllowedPermissionSetName"] == "BedrockDeveloperAccess"
+        return rc, parameters, console.export_text()
 
-    def test_new_stack_uses_dedicated_federated_role_name(self):
-        manager = Mock()
-        manager.get_stack_parameters.return_value = {}
-        manager.deploy_stack.return_value = Mock(success=True, error=None)
+    def test_deploy_passes_no_role_parameters(self):
+        """The template no longer has them; CloudFormation rejects parameters a template lacks."""
+        rc, parameters, _ = self._deploy(success=True)
+        assert rc == 0
+        assert "FederatedRoleName" not in parameters
+        assert "AllowedPermissionSetName" not in parameters
+        assert parameters["IdentityPoolName"] == "test-pool"
 
-        assert DeployCommand()._deploy_stack("auth", self._profile(), Console(), manager) == 0
+    def test_deploy_prints_the_permission_set_step(self):
+        _, _, output = self._deploy(success=True)
+        assert "attach-customer-managed-policy-reference-to-permission-set" in output
+        assert "--customer-managed-policy-reference Name=test-pool-BedrockAccessPolicy,Path=/" in output
+        assert "provision-permission-set" in output
+        assert "permission set 'BedrockDeveloperAccess'" in output
 
-        parameters = {
-            item["ParameterKey"]: item["ParameterValue"] for item in manager.deploy_stack.call_args.kwargs["parameters"]
-        }
-        assert parameters["FederatedRoleName"] == "BedrockIDCFederatedRole"
+    def test_failed_deploy_prints_no_step(self):
+        rc, _, output = self._deploy(success=False)
+        assert rc == 1
+        assert "attach-customer-managed-policy-reference-to-permission-set" not in output
 
-    def test_show_commands_omits_role_name_to_preserve_updates(self):
-        console = Console(record=True)
+    def test_show_commands_prints_template_params_and_the_step(self):
+        console = Console(record=True, width=400)
 
         DeployCommand()._show_deployment_commands("auth", self._profile(), console)
 
         output = console.export_text()
-        assert "AllowedPermissionSetName=BedrockDeveloperAccess" in output
+        assert "IdentityPoolName=test-pool" in output
+        assert "AllowedPermissionSetName=" not in output
         assert "FederatedRoleName=" not in output
+        assert "Name=test-pool-BedrockAccessPolicy,Path=/" in output
 
 
 class TestConfigSaveLoad:

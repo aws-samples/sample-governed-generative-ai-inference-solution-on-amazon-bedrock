@@ -1024,10 +1024,11 @@ Resources:
   # ============================================
 
   # IAM Managed Policy granting execute-api:Invoke on the quota API.
-  # Required for IAM-auth callers (IDC permission sets, federated roles).
+  # Required for IAM-auth callers (IDC permission sets). The quota Lambda names a
+  # user only for an IAM Identity Center session (AWSReservedSSO_ role).
   # The credential-process signs requests with SigV4, and API Gateway
   # requires the caller to have this permission in their identity policy.
-  # Admins should attach this policy to their IDC permission set or IAM role.
+  # Admins should attach this policy to their IDC permission set.
   QuotaApiInvokePolicy:
     Condition: NoJwtAuth
     Type: AWS::IAM::ManagedPolicy
@@ -1119,7 +1120,8 @@ Outputs:
     Condition: NoJwtAuth
     Description: >-
       IAM Managed Policy ARN granting execute-api:Invoke on the quota API.
-      Attach this to your IDC permission set or IAM role used by Claude Code users.
+      Attach this to your IDC permission set; the quota API names a user only
+      for IAM Identity Center sessions.
     Value: !Ref QuotaApiInvokePolicy
     Export:
       Name: !Sub '${AWS::StackName}-QuotaApiInvokePolicyArn'

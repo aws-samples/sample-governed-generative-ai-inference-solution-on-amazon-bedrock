@@ -20,6 +20,7 @@ Metadata:
           default: "Metering behavior"
         Parameters:
           - MeteringMode
+          - AttributedRoles
           - AdoptExistingConfig
       - Label:
           default: "Operations"
@@ -34,6 +35,8 @@ Metadata:
         default: "Quota table region"
       MeteringMode:
         default: "Metering mode (shadow or max)"
+      AttributedRoles:
+        default: "IAM roles whose session names identify a user"
       AdoptExistingConfig:
         default: "Adopt existing Bedrock invocation-logging configuration"
       LogRetentionDays:
@@ -68,6 +71,23 @@ Parameters:
       against client telemetry without changing enforcement. 'max' makes
       quota_check enforce on max(client, server). 'strict' is deferred to
       Phase 3 (see the design doc prerequisites).
+
+  # No default on purpose: the first update after the upgrade fails validation
+  # before anything changes unless it passes a role list, instead of silently
+  # attributing every role (the old behaviour) or none. Later updates that omit
+  # it keep the previous value. `gip deploy metering` always passes it.
+  AttributedRoles:
+    Type: String
+    AllowedPattern: '^[A-Za-z0-9+=.@_-]+\*?(,[A-Za-z0-9+=.@_-]+\*?)*$'
+    ConstraintDescription: >-
+      Comma-separated IAM role names; an entry may end in '*' to match a name
+      prefix (for example AWSReservedSSO_*).
+    Description: >-
+      Comma-separated IAM role names whose assumed-role session names the
+      processor maps to a user: the federated role of the auth stack, the
+      IAM Identity Center roles (AWSReservedSSO_*), and any role an operator names, for
+      example a Claude Apps Gateway assume_role role. A session of any other
+      role is metered under UNATTRIBUTED#<role>, whatever its session name.
 
   AdoptExistingConfig:
     Type: String
@@ -352,6 +372,7 @@ Resources:
           QUOTA_TABLE: !Ref QuotaTableName
           QUOTA_TABLE_REGION: !If [HasQuotaTableRegion, !Ref QuotaTableRegion, !Ref 'AWS::Region']
           METERING_MODE: !Ref MeteringMode
+          ATTRIBUTED_ROLES: !Ref AttributedRoles
           DEDUP_TTL_HOURS: '336'
       Code: ./lambda-functions/metering_processor/
       Tags:

@@ -27,7 +27,7 @@ flowchart TB
     Aggregate -.->|no per-user telemetry attribution| OTEL
 ```
 
-Billing data, not caller-supplied OTEL organization fields, is the attribution record in this guide. Bedrock model invocation logs are a separate quota-metering source and are not CUR or client telemetry. A stack-created logging configuration disables body delivery; a pre-existing configuration is adopted unchanged only after every content-delivery flag is verified disabled. Its service-generated counts are tamper-resistant, but Direct STS per-user attribution still requires `SessionNameBinding=email|sub`; without binding, the session name is client-asserted. Claude Apps Gateway and the direct IAM path maintain separate budget controls; this solution does not reconcile them into one hard cap.
+Billing data, not caller-supplied OTEL organization fields, is the attribution record in this guide. Bedrock model invocation logs are a separate quota-metering source and are not CUR or client telemetry. A stack-created logging configuration disables body delivery; a pre-existing configuration is adopted unchanged only after every content-delivery flag is verified disabled. Its service-generated counts are tamper-resistant, but Direct STS per-user attribution still requires `SessionNameBinding=email`; without binding, the session name is client-asserted, and with `sub` binding the metering processor cannot map the session name to a user. Claude Apps Gateway and the direct IAM path maintain separate budget controls; this solution does not reconcile them into one hard cap.
 
 ---
 
@@ -308,8 +308,12 @@ Per-provider notes:
   supported. For generic OIDC, verify your id_token actually carries the
   claim before opting in — binding fails closed for users whose token lacks it.
 - **Azure (Entra ID):** `email` can be absent for some tenant configurations
-  and guest accounts; those users would be denied in `email` mode. Prefer
-  `sub` if any of your users lack the claim.
+  and guest accounts; those users would be denied in `email` mode. For CUR
+  attribution alone, prefer `sub` if any of your users lack the claim. For
+  budgets enforced on server-side metering, `sub` does not work (the
+  processor cannot map it to a user, and `gip deploy` refuses
+  `metering_mode: max` without `email`): request `email` as an optional
+  claim in the app registration instead (see ADR-0015's per-provider table).
 - **Auth0:** `email` only. Auth0 `sub` claims are pipe-delimited
   (`auth0|…`), and `|` is not a legal STS session-name character, so the
   template does not offer `sub`.
@@ -322,12 +326,27 @@ Migration (update-safe):
 
 1. Updating the stack without setting the parameter changes nothing
    (`Default: none`; the trust-policy update is in-place, no role replacement).
-2. For `email` mode: update the stack with `SessionNameBinding=none`,
-   distribute the new client bundle, flip the parameter to `email`, verify a
-   canary user, and watch CloudTrail for STS `AccessDenied` stragglers.
-3. For `sub` mode: **all clients must be upgraded first** — flipping the
-   parameter locks out old clients (fail-closed by design).
-4. Live sessions (up to 12 h) are unaffected until their next credential
+2. For `email` mode, when server-side metering is off or in `shadow` mode:
+   update the stack with `SessionNameBinding=none`, distribute the new client
+   bundle, flip the parameter to `email`, verify a canary user, and watch
+   CloudTrail for STS `AccessDenied` stragglers.
+3. For `email` mode with `metering_mode: max`: `gip deploy` refuses `max`
+   unless the profile has `email`, and a run that deploys the quota or
+   metering stack without the auth stack also refuses until the deployed
+   stack has it. Change the profile first: set
+   `session_name_binding: email` in the profile, run `gip package` and
+   distribute the new clients, then run `gip deploy`, which deploys the auth
+   stack before the quota and metering stacks. `gip package` writes the
+   binding into the client configuration, and the new clients name their
+   session with the `email` claim, which a stack still on `none` accepts.
+   Verify a canary user and watch CloudTrail as in step 2. Or switch
+   `metering_mode` to `shadow` for the migration, follow step 2, and switch
+   back to `max`.
+4. For `sub` mode: **all clients must be upgraded first** — flipping the
+   parameter locks out old clients (fail-closed by design). Leaving `sub`
+   has no update-safe order: the trust policy accepts one claim at a time,
+   so clients fail between the client rollout and the stack update.
+5. Live sessions (up to 12 h) are unaffected until their next credential
    refresh; the binding applies at assumption time. Reversible at every step
    by flipping the parameter back to `none`.
 

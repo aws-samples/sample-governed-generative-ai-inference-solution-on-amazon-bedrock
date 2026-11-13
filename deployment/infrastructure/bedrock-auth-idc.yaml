@@ -5,10 +5,8 @@ Metadata:
   AWS::CloudFormation::Interface:
     ParameterGroups:
       - Label:
-          default: "Federation"
+          default: "Naming"
         Parameters:
-          - FederatedRoleName
-          - AllowedPermissionSetName
           - IdentityPoolName
       - Label:
           default: "Model governance"
@@ -22,12 +20,8 @@ Metadata:
           - EnableMonitoring
           - MonitoringMode
     ParameterLabels:
-      FederatedRoleName:
-        default: "Federated IAM role name"
-      AllowedPermissionSetName:
-        default: "IAM Identity Center permission set allowed to assume the role"
       IdentityPoolName:
-        default: "Identity pool name (resource name prefix)"
+        default: "Resource name prefix (the policy is <prefix>-BedrockAccessPolicy)"
       AllowedBedrockRegions:
         default: "Allowed Amazon Bedrock regions"
       RestrictToAnthropicModels:
@@ -39,31 +33,23 @@ Metadata:
       MonitoringMode:
         default: "Monitoring mode (sidecar grants direct OTLP writes)"
 
-Parameters:
-  FederatedRoleName:
-    Type: String
-    Default: 'BedrockIDCFederatedRole'
-    Description: Name of the IAM role for IAM Identity Center federation
+# IAM Identity Center users call Bedrock with their permission set's role
+# credentials; nothing assumes a role from this stack. The stack creates one
+# customer managed policy (model allow-list, Region scope, Mantle deny, and the
+# monitoring statements). Attach it to the permission set as a customer managed
+# policy reference by name (output PolicyName, path /); `gip deploy auth` prints
+# the command. Policy updates from a redeploy then apply without re-provisioning.
 
-  AllowedPermissionSetName:
-    Type: String
-    Default: 'BedrockDeveloperAccess'
-    AllowedPattern: '^[A-Za-z0-9+=,.@_-]{1,32}$'
-    Description: >-
-      Exact IAM Identity Center permission set name allowed to chain into the
-      governed Bedrock role. The generated AWSReservedSSO role suffix remains
-      wildcarded because IAM Identity Center changes it when assignments are
-      recreated.
-    
+Parameters:
   IdentityPoolName:
     Type: String
-    Description: Name for the identity pool (used for resource naming)
-    
+    Description: Resource name prefix; the policy is named <IdentityPoolName>-BedrockAccessPolicy
+
   AllowedBedrockRegions:
     Type: CommaDelimitedList
     Default: 'af-south-1,ap-east-2,ap-northeast-1,ap-northeast-2,ap-northeast-3,ap-south-1,ap-south-2,ap-southeast-1,ap-southeast-2,ap-southeast-3,ap-southeast-4,ca-central-1,ca-west-1,eu-central-1,eu-central-2,eu-north-1,eu-south-1,eu-south-2,eu-west-1,eu-west-2,eu-west-3,il-central-1,me-central-1,me-south-1,sa-east-1,us-east-1,us-east-2,us-west-1,us-west-2'
     Description: Comma-delimited list of AWS regions allowed for Bedrock access
-    
+
   RestrictToAnthropicModels:
     Type: String
     Default: 'true'
@@ -113,12 +99,13 @@ Conditions:
   OpenAIModelsAllowed: !Equals [!Ref AllowOpenAIModels, 'true']
 
 Resources:
-  # Customer-managed IAM policy for Bedrock access
+  # Customer managed policy for the IAM Identity Center permission set. It must
+  # exist (same name, path /) in each account the permission set is assigned to.
   BedrockAccessPolicy:
     Type: 'AWS::IAM::ManagedPolicy'
     Properties:
       ManagedPolicyName: !Sub '${IdentityPoolName}-BedrockAccessPolicy'
-      Description: 'Bedrock access policy for Claude Code with region restrictions'
+      Description: 'Bedrock access for the IAM Identity Center permission set: model allow-list, Region scope, Mantle deny'
       PolicyDocument:
         Version: '2012-10-17'
         Statement:
@@ -154,9 +141,7 @@ Resources:
           # bedrock:InvokeModel on the CRIS inference profile, the source-Region
           # foundation model, the account's default project and, for global.*
           # profiles, the region-less foundation model. Mantle stays denied by
-          # DenyBedrockMantleEndpoint above. IDC credential-process uses the permission
-          # set's credentials and does not assume BedrockIDCRole, so the permission set
-          # needs these statements itself (providers/iam-identity-center-setup.md).
+          # DenyBedrockMantleEndpoint above.
           - !If
             - OpenAIModelsAllowed
             - Sid: AllowOpenAIInvokeRegional
@@ -193,10 +178,6 @@ Resources:
           # Claude Desktop's credential helper returns a short-term Amazon Bedrock API key
           # (a presigned CallWithBearerToken URL signed with these credentials). The action
           # has no resource type, so it is scoped by Region and token type instead.
-          # IDC credential-process returns the permission set's role credentials and does not
-          # assume BedrockIDCRole, so this applies only to something that assumes that role or
-          # attaches this managed policy. The permission set needs the statement itself (see
-          # assets/docs/providers/iam-identity-center-setup.md).
           - Sid: AllowBedrockShortTermBearerToken
             Effect: Allow
             Action: 'bedrock:CallWithBearerToken'
@@ -224,103 +205,55 @@ Resources:
                 - 'logs:DescribeLogStreams'
               Resource: !Sub 'arn:${AWS::Partition}:logs:*:${AWS::AccountId}:log-group:/aws/gip/*'
             - !Ref 'AWS::NoValue'
-  
-  # IAM role for IAM Identity Center federation
-  BedrockIDCRole:
-    Type: 'AWS::IAM::Role'
-    Metadata:
-      guard:
-        SuppressedRules:
-          # Optional monitoring policy (conditional CloudWatch read) scoped to this federation role - converting to a managed policy adds no security.
-          - IAM_NO_INLINE_POLICY_CHECK
-    Properties:
-      RoleName: !Ref FederatedRoleName
-      Description: 'IAM role for AWS IAM Identity Center federation to access Bedrock'
-      AssumeRolePolicyDocument:
-        Version: '2012-10-17'
-        Statement:
-          # Trust only the named IAM Identity Center permission set. AWS
-          # documents account-root + aws:PrincipalArn for customer-managed
-          # roles; the trailing unique suffix must remain wildcarded.
-          - Effect: Allow
-            Principal:
-              AWS: !Sub 'arn:${AWS::Partition}:iam::${AWS::AccountId}:root'
-            Action: 'sts:AssumeRole'
-            Condition:
-              ArnLike:
-                'aws:PrincipalArn':
-                  - !Sub 'arn:${AWS::Partition}:iam::${AWS::AccountId}:role/aws-reserved/sso.amazonaws.com/AWSReservedSSO_${AllowedPermissionSetName}_*'
-                  - !Sub 'arn:${AWS::Partition}:iam::${AWS::AccountId}:role/aws-reserved/sso.amazonaws.com/*/AWSReservedSSO_${AllowedPermissionSetName}_*'
-      ManagedPolicyArns:
-        - !Ref BedrockAccessPolicy
-      # Optional CloudWatch access for monitoring
-      Policies: !If
-        - MonitoringEnabled
-        - - PolicyName: 'CloudWatchAccess'
-            PolicyDocument:
-              Version: '2012-10-17'
-              Statement:
-                # Metric publishing is scoped to the usage namespaces (same
-                # pattern as the bedrock-auth-* OIDC templates) so a federated
-                # user cannot poison arbitrary CloudWatch namespaces.
-                - Sid: AllowCloudWatchMetrics
-                  Effect: Allow
-                  Action:
-                    - 'cloudwatch:PutMetricData'
-                  Resource: '*'
-                  Condition:
-                    StringEquals:
-                      'cloudwatch:namespace':
-                        - 'GIP/Bedrock/Usage'
-                        - 'AWS/Bedrock'
-                # OTLP ingest (sidecar collector) carries no cloudwatch:namespace and is
-                # authorized against the account's OTLP dataset; allow only that.
-                # Applies only if something assumes BedrockIDCRole: the IDC sidecar collector
-                # signs with the permission set's role credentials, so the permission set needs
-                # this statement itself (see assets/docs/providers/iam-identity-center-setup.md).
-                - !If
-                  - SidecarOtlpIngest
-                  - Sid: AllowCloudWatchOtlpMetrics
-                    Effect: Allow
-                    Action:
-                      - 'cloudwatch:PutMetricData'
-                    Resource: !Sub 'arn:${AWS::Partition}:cloudwatch:*:${AWS::AccountId}:dataset/default'
-                    Condition:
-                      'Null':
-                        'cloudwatch:namespace': 'true'
-                  - !Ref 'AWS::NoValue'
-                # Read-only metric queries; these APIs are not resource-scoped
-                # and ListMetrics without a Namespace filter must keep working.
-                - Sid: AllowCloudWatchRead
-                  Effect: Allow
-                  Action:
-                    - 'cloudwatch:GetMetricStatistics'
-                    - 'cloudwatch:ListMetrics'
-                  Resource: '*'
-        - []
-      Tags:
-        - Key: 'Project'
-          Value: 'GovernedInferencePlatform'
-        - Key: 'Component'
-          Value: 'Authentication'
-        - Key: 'AuthType'
-          Value: 'IDC'
+          # Metric publishing is scoped to the usage namespaces (same pattern as the
+          # bedrock-auth-* OIDC templates) so a user cannot poison arbitrary
+          # CloudWatch namespaces.
+          - !If
+            - MonitoringEnabled
+            - Sid: AllowCloudWatchMetrics
+              Effect: Allow
+              Action:
+                - 'cloudwatch:PutMetricData'
+              Resource: '*'
+              Condition:
+                StringEquals:
+                  'cloudwatch:namespace':
+                    - 'GIP/Bedrock/Usage'
+                    - 'AWS/Bedrock'
+            - !Ref 'AWS::NoValue'
+          # OTLP ingest (sidecar collector) carries no cloudwatch:namespace and is
+          # authorized against the account's OTLP dataset; allow only that. The IDC
+          # sidecar collector signs with the permission set's role credentials.
+          - !If
+            - SidecarOtlpIngest
+            - Sid: AllowCloudWatchOtlpMetrics
+              Effect: Allow
+              Action:
+                - 'cloudwatch:PutMetricData'
+              Resource: !Sub 'arn:${AWS::Partition}:cloudwatch:*:${AWS::AccountId}:dataset/default'
+              Condition:
+                'Null':
+                  'cloudwatch:namespace': 'true'
+            - !Ref 'AWS::NoValue'
+          # Read-only metric queries; these APIs are not resource-scoped and
+          # ListMetrics without a Namespace filter must keep working.
+          - !If
+            - MonitoringEnabled
+            - Sid: AllowCloudWatchRead
+              Effect: Allow
+              Action:
+                - 'cloudwatch:GetMetricStatistics'
+                - 'cloudwatch:ListMetrics'
+              Resource: '*'
+            - !Ref 'AWS::NoValue'
 
 Outputs:
-  RoleArn:
-    Description: 'ARN of the IAM role for Identity Center federation'
-    Value: !GetAtt BedrockIDCRole.Arn
-    Export:
-      Name: !Sub '${AWS::StackName}-RoleArn'
-      
   PolicyArn:
     Description: 'ARN of the Bedrock access policy'
     Value: !Ref BedrockAccessPolicy
     Export:
       Name: !Sub '${AWS::StackName}-PolicyArn'
-      
-  RoleName:
-    Description: 'Name of the federated role'
-    Value: !Ref BedrockIDCRole
-    Export:
-      Name: !Sub '${AWS::StackName}-RoleName'
+
+  PolicyName:
+    Description: 'Name of the Bedrock access policy (path /), for the permission set customer managed policy reference'
+    Value: !Sub '${IdentityPoolName}-BedrockAccessPolicy'

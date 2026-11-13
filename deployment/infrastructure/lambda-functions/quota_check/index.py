@@ -4,6 +4,7 @@
 
 import json
 import os
+import re
 from datetime import datetime, timezone
 from decimal import Decimal
 
@@ -84,35 +85,18 @@ def lambda_handler(event, context):
             email = jwt_claims.get("email")
             groups = extract_groups_from_claims(jwt_claims)
 
-        # Path 2: IAM identity (IDC users) — extract identity from caller ARN
-        # HTTP API payload format 2.0 with AWS_IAM authorization places the caller
-        # identity at requestContext.authorizer.iam.*. Payload format 1.0 (and REST
-        # APIs) use requestContext.identity.*. The quota route is deployed as an
-        # HTTP API v2 route (quota-monitoring.yaml PayloadFormatVersion '2.0'), so
-        # read the v2 location first and keep v1 as a backwards-compatible fallback.
-        # ARN format: arn:aws:sts::ACCOUNT:assumed-role/AWSReservedSSO_.../user@company.com
-        # OR:         arn:aws:sts::ACCOUNT:assumed-role/AWSReservedSSO_.../username (non-email IDC usernames)
+        # Path 2: IAM identity (IAM Identity Center users) on the AWS_IAM route.
+        # HTTP API payload format 2.0 (quota-monitoring.yaml PayloadFormatVersion
+        # '2.0') puts the SigV4 caller at requestContext.authorizer.iam.userArn.
+        # Only an IAM Identity Center session names a user: its session name is the
+        # Identity Center username, set by the service. Any other caller picks its own
+        # session name (AssumeRole RoleSessionName) or is an IAM user it names itself,
+        # so it resolves no identity here.
         if not email:
             iam_context = authorizer_context.get("iam", {}) or {}
-            identity = event.get("requestContext", {}).get("identity", {}) or {}
-            caller_arn = (
-                iam_context.get("userArn")
-                or identity.get("caller")
-                or identity.get("userArn")
-                or ""
-            )
-            identity_source = "authorizer.iam" if iam_context.get("userArn") else "identity"
-            if "/" in caller_arn:
-                session_name = caller_arn.split("/")[-1]
-                if "@" in session_name:
-                    # Standard case: IDC username is an email address
-                    email = session_name
-                    print(f"Identity resolved from IAM ARN ({identity_source}, email): {email}")
-                elif session_name and "AWSReservedSSO" in caller_arn:
-                    # IDC username without @ (e.g. "akshaya.claude" instead of "user@company.com")
-                    # Use the raw username as the identity — policies can be set by username
-                    email = session_name
-                    print(f"Identity resolved from IAM ARN ({identity_source}, IDC username): {email}")
+            email = idc_username_from_arn(iam_context.get("userArn") or "")
+            if email:
+                print(f"Identity resolved from IAM Identity Center session: {email}")
 
         if not email:
             # Neither JWT nor IAM identity resolved
@@ -129,8 +113,11 @@ def lambda_handler(event, context):
                 },
             )
 
-        # 1. Resolve the effective quota policy for this user
-        policy = resolve_quota_for_user(email, groups)
+        # 1. Resolve the quota policies that apply to this user: the user policy, else
+        # every enabled group policy, else the default. Each one is checked below; the
+        # lowest-limit one is what the response reports when none of them denies.
+        policies = resolve_policies_for_user(email, groups)
+        policy = _display_policy(policies)
 
         if policy is None:
             # No policy = unlimited (quota monitoring disabled)
@@ -168,96 +155,17 @@ def lambda_handler(event, context):
 
         # 3. Get current usage
         usage = get_user_usage(email)
+
+        # 4. Deny when any one policy, evaluated alone, would deny. The sort is stable,
+        # so the first entry is the policy _display_policy reports (min() also keeps the
+        # first on ties) and a deny from it reads exactly as a single-policy check's would.
+        for candidate in sorted(policies, key=_policy_limit_sort_key):
+            denial = _limit_denial(candidate, usage)
+            if denial:
+                return build_response(200, denial)
+
         usage_summary = build_usage_summary(usage, policy)
-
-        # 4. Monthly and daily enforcement modes are independent.
         enforcement_mode = policy.get("enforcement_mode", "alert")
-        daily_mode = policy.get("daily_enforcement_mode", "alert")
-
-        # 5. Check limits (monthly, daily) — supports both token and cost modes
-        monthly_tokens = usage.get("total_tokens", 0)
-        daily_tokens = usage.get("daily_tokens", 0)
-        monthly_cost = float(usage.get("estimated_cost", 0))
-        daily_cost = float(usage.get("daily_cost_usd", 0))
-
-        monthly_limit = policy.get("monthly_token_limit", 0)
-        daily_limit = policy.get("daily_token_limit")
-        monthly_cost_limit = float(policy.get("monthly_cost_limit", 0))
-        daily_cost_limit = float(policy.get("daily_cost_limit", 0))
-
-        # Cost-based enforcement (takes precedence when configured)
-        if enforcement_mode == "block" and monthly_cost_limit > 0 and monthly_cost >= monthly_cost_limit:
-            return build_response(
-                200,
-                {
-                    "allowed": False,
-                    "reason": "monthly_cost_exceeded",
-                    "enforcement_mode": enforcement_mode,
-                    "usage": usage_summary,
-                    "policy": {
-                        "type": policy.get("policy_type"),
-                        "identifier": policy.get("identifier"),
-                    },
-                    "unblock_status": {"is_unblocked": False},
-                    "message": f"Monthly spend limit exceeded: ${monthly_cost:.2f} / ${monthly_cost_limit:.2f} ({monthly_cost / monthly_cost_limit * 100:.1f}%). Contact your administrator.",
-                },
-            )
-
-        if daily_cost_limit > 0 and daily_cost >= daily_cost_limit:
-            if daily_mode == "block":
-                return build_response(
-                    200,
-                    {
-                        "allowed": False,
-                        "reason": "daily_cost_exceeded",
-                        "enforcement_mode": enforcement_mode,
-                        "usage": usage_summary,
-                        "policy": {
-                            "type": policy.get("policy_type"),
-                            "identifier": policy.get("identifier"),
-                        },
-                        "unblock_status": {"is_unblocked": False},
-                        "message": f"Daily spend limit exceeded: ${daily_cost:.2f} / ${daily_cost_limit:.2f}. Resets at UTC midnight.",
-                    },
-                )
-
-        # Token-based enforcement (existing behavior)
-        # Check monthly token limit
-        if enforcement_mode == "block" and monthly_limit > 0 and monthly_tokens >= monthly_limit:
-            return build_response(
-                200,
-                {
-                    "allowed": False,
-                    "reason": "monthly_exceeded",
-                    "enforcement_mode": enforcement_mode,
-                    "usage": usage_summary,
-                    "policy": {
-                        "type": policy.get("policy_type"),
-                        "identifier": policy.get("identifier"),
-                    },
-                    "unblock_status": {"is_unblocked": False},
-                    "message": f"Monthly quota exceeded: {int(monthly_tokens):,} / {int(monthly_limit):,} tokens ({monthly_tokens / monthly_limit * 100:.1f}%). Contact your administrator for assistance.",
-                },
-            )
-
-        # Check daily token limit (if configured)
-        if daily_limit and daily_limit > 0 and daily_tokens >= daily_limit:
-            if daily_mode == "block":
-                return build_response(
-                    200,
-                    {
-                        "allowed": False,
-                        "reason": "daily_exceeded",
-                        "enforcement_mode": enforcement_mode,
-                        "usage": usage_summary,
-                        "policy": {
-                            "type": policy.get("policy_type"),
-                            "identifier": policy.get("identifier"),
-                        },
-                        "unblock_status": {"is_unblocked": False},
-                        "message": f"Daily quota exceeded: {int(daily_tokens):,} / {int(daily_limit):,} tokens ({daily_tokens / daily_limit * 100:.1f}%). Quota resets at UTC midnight.",
-                    },
-                )
 
         # All checks passed - access allowed
         return build_response(
@@ -315,6 +223,54 @@ def lambda_handler(event, context):
         )
 
 
+def _limit_denial(policy: dict, usage: dict) -> dict | None:
+    """Return the deny response body when ``policy`` alone blocks ``usage``, else None.
+
+    Monthly and daily enforcement modes are independent. Cost limits are checked
+    before token limits, monthly before daily.
+    """
+    enforcement_mode = policy.get("enforcement_mode", "alert")
+    daily_mode = policy.get("daily_enforcement_mode", "alert")
+
+    monthly_tokens = usage.get("total_tokens", 0)
+    daily_tokens = usage.get("daily_tokens", 0)
+    monthly_cost = float(usage.get("estimated_cost", 0))
+    daily_cost = float(usage.get("daily_cost_usd", 0))
+
+    monthly_limit = policy.get("monthly_token_limit", 0)
+    daily_limit = policy.get("daily_token_limit")
+    monthly_cost_limit = float(policy.get("monthly_cost_limit", 0))
+    daily_cost_limit = float(policy.get("daily_cost_limit", 0))
+
+    if enforcement_mode == "block" and monthly_cost_limit > 0 and monthly_cost >= monthly_cost_limit:
+        reason = "monthly_cost_exceeded"
+        message = f"Monthly spend limit exceeded: ${monthly_cost:.2f} / ${monthly_cost_limit:.2f} ({monthly_cost / monthly_cost_limit * 100:.1f}%). Contact your administrator."
+    elif daily_mode == "block" and daily_cost_limit > 0 and daily_cost >= daily_cost_limit:
+        reason = "daily_cost_exceeded"
+        message = f"Daily spend limit exceeded: ${daily_cost:.2f} / ${daily_cost_limit:.2f}. Resets at UTC midnight."
+    elif enforcement_mode == "block" and monthly_limit > 0 and monthly_tokens >= monthly_limit:
+        reason = "monthly_exceeded"
+        message = f"Monthly quota exceeded: {int(monthly_tokens):,} / {int(monthly_limit):,} tokens ({monthly_tokens / monthly_limit * 100:.1f}%). Contact your administrator for assistance."
+    elif daily_mode == "block" and daily_limit and daily_limit > 0 and daily_tokens >= daily_limit:
+        reason = "daily_exceeded"
+        message = f"Daily quota exceeded: {int(daily_tokens):,} / {int(daily_limit):,} tokens ({daily_tokens / daily_limit * 100:.1f}%). Quota resets at UTC midnight."
+    else:
+        return None
+
+    return {
+        "allowed": False,
+        "reason": reason,
+        "enforcement_mode": enforcement_mode,
+        "usage": build_usage_summary(usage, policy),
+        "policy": {
+            "type": policy.get("policy_type"),
+            "identifier": policy.get("identifier"),
+        },
+        "unblock_status": {"is_unblocked": False},
+        "message": message,
+    }
+
+
 def build_response(status_code: int, body: dict) -> dict:
     """Build API Gateway response with CORS headers."""
     return {
@@ -329,6 +285,26 @@ def build_response(status_code: int, body: dict) -> dict:
         },
         "body": json.dumps(body, cls=DecimalEncoder),
     }
+
+
+# An STS assumed-role session ARN, in full: partition, sts, empty Region, 12-digit account,
+# assumed-role/<role>/<session>, role and session in IAM's characters. Groups: role, session.
+# metering_processor/index.py holds the same pattern, and a test keeps the two identical.
+ASSUMED_ROLE_SESSION_ARN = re.compile(
+    r"arn:aws[a-z-]*:sts::[0-9]{12}:assumed-role/([\w+=,.@-]+)/([\w+=,.@-]+)", re.ASCII
+)
+
+
+def idc_username_from_arn(arn: str) -> str | None:
+    """Return the session name of an IAM Identity Center assumed-role session ARN, else None.
+
+    arn:<partition>:sts::<account>:assumed-role/AWSReservedSSO_<set>_<suffix>/<username>, matched
+    in full, so a string that merely contains such an ARN (an IAM user's path can) names nobody.
+    """
+    match = ASSUMED_ROLE_SESSION_ARN.fullmatch(arn)
+    if match and match.group(1).startswith("AWSReservedSSO_"):
+        return match.group(2)
+    return None
 
 
 def extract_groups_from_claims(claims: dict) -> list:
@@ -375,12 +351,27 @@ def extract_groups_from_claims(claims: dict) -> list:
 
 
 def resolve_quota_for_user(email: str, groups: list) -> dict | None:
+    """Return the one policy reported for a user: the lowest-limit applicable policy, or None (unlimited).
+
+    Enforcement checks every policy from resolve_policies_for_user; this is only the
+    policy a response names when none of them denies.
     """
-    Resolve the effective quota policy for a user.
-    Precedence: user-specific > group (most restrictive) > default
+    return _display_policy(resolve_policies_for_user(email, groups))
+
+
+def _display_policy(policies: list) -> dict | None:
+    """The lowest-limit policy (first one on ties), or None when no policy applies."""
+    return min(policies, key=_policy_limit_sort_key) if policies else None
+
+
+def resolve_policies_for_user(email: str, groups: list) -> list:
+    """
+    Resolve the quota policies that apply to a user; the handler denies if any one denies.
+    Precedence: user-specific > group > default. A user policy or the default is
+    returned alone; every enabled group policy is returned together.
 
     Returns:
-        Policy dict or None if no policy applies (unlimited).
+        List of policy dicts, empty if no policy applies (unlimited).
     """
     if not ENABLE_FINEGRAINED_QUOTAS and (
         MONTHLY_TOKEN_LIMIT > 0 or MONTHLY_COST_LIMIT_USD > 0 or DAILY_COST_LIMIT_USD > 0
@@ -389,7 +380,7 @@ def resolve_quota_for_user(email: str, groups: list) -> dict | None:
         # alongside token limits so cost-mode deployments enforce without any
         # fine-grained DynamoDB policy (regression: cost env defaults were
         # previously dropped here, so cost mode never blocked anyone).
-        return {
+        environment_policy = {
             "policy_type": "default",
             "identifier": "environment",
             "quota_mode": QUOTA_MODE,
@@ -403,13 +394,14 @@ def resolve_quota_for_user(email: str, groups: list) -> dict | None:
             "daily_enforcement_mode": DAILY_ENFORCEMENT_MODE,
             "enabled": True,
         }
+        return [environment_policy]
 
     # 1. Check for user-specific policy
     user_policy = get_policy("user", email)
     if user_policy and user_policy.get("enabled", True):
-        return user_policy
+        return [user_policy]
 
-    # 2. Check for group policies (apply most restrictive)
+    # 2. Every enabled group policy applies
     if groups:
         group_policies = []
         for group in groups:
@@ -418,15 +410,15 @@ def resolve_quota_for_user(email: str, groups: list) -> dict | None:
                 group_policies.append(group_policy)
 
         if group_policies:
-            return min(group_policies, key=_policy_limit_sort_key)
+            return group_policies
 
     # 3. Fall back to default policy
     default_policy = get_policy("default", "default")
     if default_policy and default_policy.get("enabled", True):
-        return default_policy
+        return [default_policy]
 
     # 4. No policy = unlimited
-    return None
+    return []
 
 
 def get_policy(policy_type: str, identifier: str) -> dict | None:
@@ -479,7 +471,7 @@ def get_policy(policy_type: str, identifier: str) -> dict | None:
 
 
 def _policy_limit_sort_key(policy: dict) -> tuple[float, float]:
-    """Order group policies by their primary configured limit."""
+    """Order policies by their primary configured limit (cost in cost mode, tokens otherwise), then the other."""
     monthly_cost = float(policy.get("monthly_cost_limit", 0) or 0)
     monthly_tokens = float(policy.get("monthly_token_limit", 0) or 0)
     if policy.get("quota_mode") == "cost":
@@ -512,20 +504,21 @@ def get_unblock_status(email: str) -> dict:
             if datetime.now(timezone.utc) > expires_dt:
                 return {"is_unblocked": False, "expired": True}
 
+        # Who unblocked the user and why stay in the table (gip quota unblock shows
+        # them to admins); the client response carries only what the user needs.
         return {
             "is_unblocked": True,
             "expires_at": expires_at,
-            "unblocked_by": item.get("unblocked_by"),
             "unblocked_at": item.get("unblocked_at"),
-            "reason": item.get("reason"),
             "duration_type": item.get("duration_type"),
         }
     except Exception as e:
         # Deliberate swallow: the failure direction is "deny the override",
         # which is fail-closed (the user stays blocked). Contrast get_policy /
-        # get_user_usage, where swallowing would fail open (review F1/F2).
+        # get_user_usage, where swallowing would fail open. The error text goes
+        # to the log only, so no caller can pass it on.
         print(f"Error checking unblock status for {email}: {e}")
-        return {"is_unblocked": False, "error": str(e)}
+        return {"is_unblocked": False}
 
 
 def get_user_usage(email: str) -> dict:

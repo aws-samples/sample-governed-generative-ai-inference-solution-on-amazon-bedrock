@@ -70,6 +70,20 @@ def _deploy_metering(profile, console=None):
     """Run the metering deploy with AWS mocked; return the parameter dict of each regional deploy."""
     manager = MagicMock(spec=CloudFormationManager)
     manager.region = profile.aws_region
+    # The auth stack is read with DescribeStacks (read_stack), so a failed read is told apart from a missing output.
+    manager.cf_client = MagicMock()
+    manager.cf_client.describe_stacks.return_value = {
+        "Stacks": [
+            {
+                "Outputs": [
+                    {
+                        "OutputKey": "DirectSTSRoleArn",
+                        "OutputValue": "arn:aws:iam::123456789012:role/BedrockOktaFederatedRole",
+                    }
+                ]
+            }
+        ]
+    }
     result = MagicMock()
     result.success = True
     result.outputs = {}
@@ -100,9 +114,14 @@ class TestDeployMeteringParams:
         assert all(params.get("AdoptExistingConfig") == "true" for params in deployed)
 
     def test_default_profile_parameters_are_unchanged(self):
-        """Profiles that don't opt in send exactly the parameters they sent before."""
+        """Profiles that don't opt in send no AdoptExistingConfig (only the parameters every profile sends)."""
         deployed = _deploy_metering(Profile.from_dict(dict(BASE_PROFILE)))
-        before = {"QuotaTableName": "UserQuotaMetrics", "QuotaTableRegion": "us-east-1", "MeteringMode": "shadow"}
+        before = {
+            "QuotaTableName": "UserQuotaMetrics",
+            "QuotaTableRegion": "us-east-1",
+            "MeteringMode": "shadow",
+            "AttributedRoles": "BedrockOktaFederatedRole",
+        }
         assert deployed == [before, before]
 
     def test_hand_edited_string_value_warns_and_is_treated_as_off(self):

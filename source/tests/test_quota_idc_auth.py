@@ -12,6 +12,8 @@ import os
 import sys
 from unittest.mock import MagicMock, patch
 
+import pytest
+
 # Add the lambda function to path
 sys.path.insert(
     0,
@@ -75,12 +77,12 @@ class TestIdentityResolution:
         )
 
         with (
-            patch.object(index, "resolve_quota_for_user") as mock_resolve,
+            patch.object(index, "resolve_policies_for_user") as mock_resolve,
             patch.object(index, "get_unblock_status", return_value=None),
             patch.object(index, "get_user_usage_summary", return_value={}),
             patch.object(index, "get_user_usage", return_value={}),
         ):
-            mock_resolve.return_value = self._unlimited_policy()
+            mock_resolve.return_value = [self._unlimited_policy()]
 
             result = index.lambda_handler(event, None)
             body = json.loads(result["body"])
@@ -96,12 +98,12 @@ class TestIdentityResolution:
         )
 
         with (
-            patch.object(index, "resolve_quota_for_user") as mock_resolve,
+            patch.object(index, "resolve_policies_for_user") as mock_resolve,
             patch.object(index, "get_unblock_status", return_value=None),
             patch.object(index, "get_user_usage_summary", return_value={}),
             patch.object(index, "get_user_usage", return_value={}),
         ):
-            mock_resolve.return_value = self._unlimited_policy()
+            mock_resolve.return_value = [self._unlimited_policy()]
 
             result = index.lambda_handler(event, None)
 
@@ -109,38 +111,38 @@ class TestIdentityResolution:
             assert json.loads(result["body"])["allowed"] is True
 
     def test_v2_iam_context_preferred_over_legacy_identity(self):
-        """When both shapes are present, the v2 authorizer.iam ARN wins."""
+        """When both shapes are present, only the v2 authorizer.iam ARN is read."""
         event = self._make_event(
-            caller_arn="arn:aws:sts::123456789012:assumed-role/Role/legacy@company.com",
-            iam_user_arn="arn:aws:sts::123456789012:assumed-role/Role/v2user@company.com",
+            caller_arn="arn:aws:sts::123456789012:assumed-role/AWSReservedSSO_BedrockAccess_abc123/legacy@company.com",
+            iam_user_arn="arn:aws:sts::123456789012:assumed-role/AWSReservedSSO_BedrockAccess_abc123/v2user@company.com",
         )
 
         with (
-            patch.object(index, "resolve_quota_for_user") as mock_resolve,
+            patch.object(index, "resolve_policies_for_user") as mock_resolve,
             patch.object(index, "get_unblock_status", return_value=None),
             patch.object(index, "get_user_usage_summary", return_value={}),
             patch.object(index, "get_user_usage", return_value={}),
         ):
-            mock_resolve.return_value = self._unlimited_policy()
+            mock_resolve.return_value = [self._unlimited_policy()]
 
             index.lambda_handler(event, None)
 
             mock_resolve.assert_called_once_with("v2user@company.com", [])
 
     def test_jwt_preferred_over_v2_iam_context(self):
-        """JWT claims still take priority over the v2 IAM ARN."""
+        """JWT claims still take priority over an IAM Identity Center ARN that names a user."""
         event = self._make_event(
             jwt_claims={"email": "jwt-user@company.com", "sub": "abc"},
-            iam_user_arn="arn:aws:sts::123456789012:assumed-role/Role/iam-user@company.com",
+            iam_user_arn="arn:aws:sts::123456789012:assumed-role/AWSReservedSSO_BedrockAccess_abc123/iam-user@company.com",
         )
 
         with (
-            patch.object(index, "resolve_quota_for_user") as mock_resolve,
+            patch.object(index, "resolve_policies_for_user") as mock_resolve,
             patch.object(index, "get_unblock_status", return_value=None),
             patch.object(index, "get_user_usage_summary", return_value={}),
             patch.object(index, "get_user_usage", return_value={}),
         ):
-            mock_resolve.return_value = self._unlimited_policy()
+            mock_resolve.return_value = [self._unlimited_policy()]
 
             index.lambda_handler(event, None)
 
@@ -151,19 +153,21 @@ class TestIdentityResolution:
         event = self._make_event(jwt_claims={"email": "alice@company.com", "sub": "abc123"})
 
         with (
-            patch.object(index, "resolve_quota_for_user") as mock_resolve,
+            patch.object(index, "resolve_policies_for_user") as mock_resolve,
             patch.object(index, "get_unblock_status", return_value=None),
             patch.object(index, "get_user_usage_summary", return_value={}),
             patch.object(index, "get_user_usage", return_value={}),
         ):
-            mock_resolve.return_value = {
-                "monthly_limit": 225000000,
-                "daily_limit": 0,
-                "enforcement_mode": "alert",
-                "enabled": True,
-                "warning_threshold_80": 180000000,
-                "warning_threshold_90": 202500000,
-            }
+            mock_resolve.return_value = [
+                {
+                    "monthly_limit": 225000000,
+                    "daily_limit": 0,
+                    "enforcement_mode": "alert",
+                    "enabled": True,
+                    "warning_threshold_80": 180000000,
+                    "warning_threshold_90": 202500000,
+                }
+            ]
 
             result = index.lambda_handler(event, None)
             body = json.loads(result["body"])
@@ -174,23 +178,25 @@ class TestIdentityResolution:
     def test_idc_user_with_email_in_arn(self):
         """IDC user: identity resolved from assumed-role ARN session name."""
         event = self._make_event(
-            caller_arn="arn:aws:sts::123456789012:assumed-role/AWSReservedSSO_BedrockAccess_abc123/bob@company.com"
+            iam_user_arn="arn:aws:sts::123456789012:assumed-role/AWSReservedSSO_BedrockAccess_abc123/bob@company.com"
         )
 
         with (
-            patch.object(index, "resolve_quota_for_user") as mock_resolve,
+            patch.object(index, "resolve_policies_for_user") as mock_resolve,
             patch.object(index, "get_unblock_status", return_value=None),
             patch.object(index, "get_user_usage_summary", return_value={}),
             patch.object(index, "get_user_usage", return_value={}),
         ):
-            mock_resolve.return_value = {
-                "monthly_limit": 225000000,
-                "daily_limit": 0,
-                "enforcement_mode": "alert",
-                "enabled": True,
-                "warning_threshold_80": 180000000,
-                "warning_threshold_90": 202500000,
-            }
+            mock_resolve.return_value = [
+                {
+                    "monthly_limit": 225000000,
+                    "daily_limit": 0,
+                    "enforcement_mode": "alert",
+                    "enabled": True,
+                    "warning_threshold_80": 180000000,
+                    "warning_threshold_90": 202500000,
+                }
+            ]
 
             result = index.lambda_handler(event, None)
             body = json.loads(result["body"])
@@ -205,7 +211,7 @@ class TestIdentityResolution:
         The Lambda resolves the session name and proceeds to quota check.
         """
         event = self._make_event(
-            caller_arn="arn:aws:sts::123456789012:assumed-role/AWSReservedSSO_BedrockAccess_abc123/session123"
+            iam_user_arn="arn:aws:sts::123456789012:assumed-role/AWSReservedSSO_BedrockAccess_abc123/session123"
         )
 
         # Successful-but-empty policy lookups = "no policy". (The old get_policy
@@ -234,23 +240,25 @@ class TestIdentityResolution:
         """JWT present but missing email claim — falls through to IAM ARN."""
         event = self._make_event(
             jwt_claims={"sub": "abc123"},  # no email
-            caller_arn="arn:aws:sts::123456789012:assumed-role/Role/carol@company.com",
+            iam_user_arn="arn:aws:sts::123456789012:assumed-role/AWSReservedSSO_BedrockAccess_abc123/carol@company.com",
         )
 
         with (
-            patch.object(index, "resolve_quota_for_user") as mock_resolve,
+            patch.object(index, "resolve_policies_for_user") as mock_resolve,
             patch.object(index, "get_unblock_status", return_value=None),
             patch.object(index, "get_user_usage_summary", return_value={}),
             patch.object(index, "get_user_usage", return_value={}),
         ):
-            mock_resolve.return_value = {
-                "monthly_limit": 225000000,
-                "daily_limit": 0,
-                "enforcement_mode": "alert",
-                "enabled": True,
-                "warning_threshold_80": 180000000,
-                "warning_threshold_90": 202500000,
-            }
+            mock_resolve.return_value = [
+                {
+                    "monthly_limit": 225000000,
+                    "daily_limit": 0,
+                    "enforcement_mode": "alert",
+                    "enabled": True,
+                    "warning_threshold_80": 180000000,
+                    "warning_threshold_90": 202500000,
+                }
+            ]
 
             result = index.lambda_handler(event, None)
             body = json.loads(result["body"])
@@ -260,38 +268,172 @@ class TestIdentityResolution:
 
     def test_malformed_arn_no_slash(self):
         """Malformed ARN without slashes — should not crash."""
-        event = self._make_event(caller_arn="not-a-valid-arn")
+        event = self._make_event(iam_user_arn="not-a-valid-arn")
 
         result = index.lambda_handler(event, None)
         body = json.loads(result["body"])
 
-        # "not-a-valid-arn" split by "/" gives ["not-a-valid-arn"] — no @ → missing identity
+        # Not an STS assumed-role session ARN, so it names nobody: missing identity
         assert body["reason"] == "missing_identity"
 
     def test_jwt_preferred_over_arn_when_both_present(self):
-        """When both JWT email and ARN are available, JWT takes priority."""
+        """When both a JWT email and an Identity Center username are available, JWT takes priority."""
         event = self._make_event(
             jwt_claims={"email": "jwt-user@company.com", "sub": "abc"},
-            caller_arn="arn:aws:sts::123456789012:assumed-role/Role/arn-user@company.com",
+            iam_user_arn="arn:aws:sts::123456789012:assumed-role/AWSReservedSSO_BedrockAccess_abc123/arn.user",
         )
 
         with (
-            patch.object(index, "resolve_quota_for_user") as mock_resolve,
+            patch.object(index, "resolve_policies_for_user") as mock_resolve,
             patch.object(index, "get_unblock_status", return_value=None),
             patch.object(index, "get_user_usage_summary", return_value={}),
             patch.object(index, "get_user_usage", return_value={}),
         ):
-            mock_resolve.return_value = {
-                "monthly_limit": 225000000,
-                "daily_limit": 0,
-                "enforcement_mode": "alert",
-                "enabled": True,
-                "warning_threshold_80": 180000000,
-                "warning_threshold_90": 202500000,
-            }
+            mock_resolve.return_value = [
+                {
+                    "monthly_limit": 225000000,
+                    "daily_limit": 0,
+                    "enforcement_mode": "alert",
+                    "enabled": True,
+                    "warning_threshold_80": 180000000,
+                    "warning_threshold_90": 202500000,
+                }
+            ]
 
             result = index.lambda_handler(event, None)
             json.loads(result["body"])
 
             # JWT email takes priority
             mock_resolve.assert_called_once_with("jwt-user@company.com", [])
+
+
+# Strings that contain an IAM Identity Center session ARN, or nearly are one, without being
+# one in full. An IAM user's path may hold ':' and '/', so a user ARN can embed the text.
+NOT_A_SESSION_ARN = {
+    "iam-user-path": "arn:aws:iam::123456789012:user/:assumed-role/AWSReservedSSO_x/victim@example.com",
+    "trailing-newline": "arn:aws:sts::123456789012:assumed-role/AWSReservedSSO_Dev_0123/victim@example.com\n",
+    "extra-segment": "arn:aws:sts::123456789012:assumed-role/AWSReservedSSO_Dev_0123/extra/victim@example.com",
+    "text-before": "x arn:aws:sts::123456789012:assumed-role/AWSReservedSSO_Dev_0123/victim@example.com",
+    "region-set": "arn:aws:sts:us-east-1:123456789012:assumed-role/AWSReservedSSO_Dev_0123/victim@example.com",
+    "iam-service": "arn:aws:iam::123456789012:assumed-role/AWSReservedSSO_Dev_0123/victim@example.com",
+    "short-account": "arn:aws:sts::12345678901:assumed-role/AWSReservedSSO_Dev_0123/victim@example.com",
+    "non-ascii-session": "arn:aws:sts::123456789012:assumed-role/AWSReservedSSO_Dev_0123/vict\u00efm@example.com",
+}
+
+PARTITIONS = ["aws", "aws-cn", "aws-us-gov"]
+
+
+class TestIdentityCenterArnParse:
+    """idc_username_from_arn names a user only for a string that is, in full, a session ARN."""
+
+    @pytest.mark.parametrize("partition", PARTITIONS)
+    def test_session_in_each_partition_names_the_user(self, partition):
+        arn = f"arn:{partition}:sts::123456789012:assumed-role/AWSReservedSSO_Dev_0123456789abcdef/alice"
+        assert index.idc_username_from_arn(arn) == "alice"
+
+    @pytest.mark.parametrize("arn", list(NOT_A_SESSION_ARN.values()), ids=list(NOT_A_SESSION_ARN))
+    def test_anything_else_names_nobody(self, arn):
+        assert index.idc_username_from_arn(arn) is None
+
+
+class TestSigV4CallerIdentity:
+    """The AWS_IAM route names a user only for an IAM Identity Center session.
+
+    API Gateway puts the signed caller at requestContext.authorizer.iam.userArn (HTTP API
+    payload 2.0). Only an STS assumed-role session ARN, matched in full, whose role name
+    starts with AWSReservedSSO_ names a user, by its session name, which IAM Identity
+    Center sets. Any other caller chooses its own session name (AssumeRole
+    RoleSessionName) or names itself (IAM user), so it resolves no identity.
+    """
+
+    UNBLOCK = {
+        "pk": "USER#victim@example.com",
+        "sk": "UNBLOCK#CURRENT",
+        "expires_at": "2099-01-01T00:00:00Z",
+        "unblocked_by": "admin@example.com",
+        "unblocked_at": "2026-11-01T00:00:00Z",
+        "reason": "medical leave, approved by HR",
+        "duration_type": "custom",
+    }
+
+    def _check(self, event, block_missing=True):
+        policy = {"policy_type": "user", "identifier": "x", "monthly_token_limit": 1000, "enforcement_mode": "block"}
+        quota_table = MagicMock()
+        quota_table.get_item.side_effect = lambda Key: (
+            {"Item": dict(self.UNBLOCK)} if Key["sk"] == "UNBLOCK#CURRENT" else {}
+        )
+        with (
+            patch.object(index, "MISSING_EMAIL_ENFORCEMENT", "block" if block_missing else "warn"),
+            patch.object(index, "resolve_policies_for_user", return_value=[policy]) as resolve,
+            patch.object(index, "quota_table", quota_table),
+            patch.object(index, "get_user_usage_summary", return_value={}),
+        ):
+            body = json.loads(index.lambda_handler(event, None)["body"])
+        return body, resolve
+
+    @staticmethod
+    def _iam(arn):
+        return {"requestContext": {"authorizer": {"iam": {"userArn": arn, "accountId": "123456789012"}}}}
+
+    def test_identity_center_session_names_the_user(self):
+        body, resolve = self._check(
+            self._iam("arn:aws:sts::123456789012:assumed-role/AWSReservedSSO_BedrockDev_0123/me@example.com")
+        )
+        resolve.assert_called_once_with("me@example.com", [])
+        assert body["reason"] != "missing_identity"
+
+    @pytest.mark.parametrize("partition", PARTITIONS)
+    def test_identity_center_session_in_each_partition(self, partition):
+        body, resolve = self._check(
+            self._iam(f"arn:{partition}:sts::123456789012:assumed-role/AWSReservedSSO_BedrockDev_0123/me@example.com")
+        )
+        resolve.assert_called_once_with("me@example.com", [])
+        assert body["reason"] != "missing_identity"
+
+    @pytest.mark.parametrize("arn", list(NOT_A_SESSION_ARN.values()), ids=list(NOT_A_SESSION_ARN))
+    def test_string_that_is_not_a_session_arn_resolves_no_identity(self, arn):
+        body, resolve = self._check(self._iam(arn))
+        resolve.assert_not_called()
+        assert body["reason"] == "missing_identity"
+        assert body["allowed"] is False
+
+    @pytest.mark.parametrize(
+        "arn",
+        [
+            "arn:aws:sts::123456789012:assumed-role/PowerUserRole/victim@example.com",
+            "arn:aws:iam::123456789012:user/victim@example.com",
+            "arn:aws:sts::123456789012:assumed-role/SomeRole/AWSReservedSSO-victim",
+            "arn:aws:sts::123456789012:assumed-role/MyAWSReservedSSO_BedrockDev_0123/victim@example.com",
+            "arn:aws:sts::123456789012:assumed-role/AWSReservedSSO_BedrockDev_0123",
+        ],
+        ids=["chosen-session-name", "iam-user", "reserved-in-session-name", "look-alike-role", "no-session-name"],
+    )
+    def test_other_callers_resolve_no_identity(self, arn):
+        body, resolve = self._check(self._iam(arn))
+        resolve.assert_not_called()
+        assert body["reason"] == "missing_identity"
+        assert body["allowed"] is False
+
+    def test_legacy_identity_location_is_not_read(self):
+        """Payload format 2.0 never fills requestContext.identity, so a value there names nobody."""
+        event = {
+            "requestContext": {
+                "identity": {
+                    "caller": "arn:aws:sts::123456789012:assumed-role/AWSReservedSSO_BedrockDev_0123/victim@example.com",
+                    "userArn": "arn:aws:sts::123456789012:assumed-role/AWSReservedSSO_BedrockDev_0123/victim@example.com",
+                }
+            }
+        }
+        body, resolve = self._check(event)
+        resolve.assert_not_called()
+        assert body["reason"] == "missing_identity"
+
+    def test_unblock_response_omits_who_unblocked_and_why(self):
+        body, _ = self._check(
+            self._iam("arn:aws:sts::123456789012:assumed-role/AWSReservedSSO_BedrockDev_0123/victim@example.com")
+        )
+        assert body["reason"] == "unblocked"
+        assert body["unblock_status"]["is_unblocked"] is True
+        assert body["unblock_status"]["expires_at"] == "2099-01-01T00:00:00Z"
+        assert "unblocked_by" not in body["unblock_status"]
+        assert "reason" not in body["unblock_status"]

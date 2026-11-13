@@ -178,8 +178,10 @@ inference-profile ARNs (default-on `RestrictToAnthropicModels`,
 [ADR-0006](adr/0006-default-on-iam-model-scoping.md)), and only in the regions
 listed in `allowed_bedrock_regions`. IAM evaluates that policy on every API
 call. IDC returns credentials for the configured AWSReservedSSO permission-set
-role directly; its model/region policy must be configured on that permission
-set and is not inherited from `bedrock-auth-idc.yaml`. Passthrough mode returns
+role directly; its model/region policy applies once the permission set
+references the customer managed policy that `bedrock-auth-idc.yaml` creates
+(`gip deploy auth` prints the step), or comes from the permission set's own
+policies. Passthrough mode returns
 ambient credentials whose policy is also external to GIP.
 
 This is the strongest control in the platform precisely because it is not
