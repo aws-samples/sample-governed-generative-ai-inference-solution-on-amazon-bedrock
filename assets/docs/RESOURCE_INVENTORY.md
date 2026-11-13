@@ -682,21 +682,21 @@ the Bedrock access policy and federated IAM role used by IDC sessions.
 | `AWS::Cognito::UserPool` | `cognito-idp` | 1 |
 | `AWS::Cognito::UserPoolClient` | `cognito-idp` | 2 |
 | `AWS::Cognito::UserPoolDomain` | `cognito-idp` | 1 |
-| `AWS::Cognito::UserPoolIdentityProvider` | `cognito-idp` | 1 in Federate mode |
-| `AWS::IAM::Role` | `iam` | 1 + 1 in Federate mode + 1 when custom-claim injection is enabled |
-| `AWS::Lambda::Function` | `lambda` | 1 + 1 in Federate mode + 1 when custom-claim injection is enabled |
+| `AWS::Cognito::UserPoolIdentityProvider` | `cognito-idp` | 1 with an external OIDC provider |
+| `AWS::IAM::Role` | `iam` | 1 + 1 with an external OIDC provider + 1 when custom-claim injection is enabled |
+| `AWS::Lambda::Function` | `lambda` | 1 + 1 with an external OIDC provider + 1 when custom-claim injection is enabled |
 | `AWS::Lambda::Permission` | `lambda` | 1 when custom-claim injection is enabled |
-| `AWS::CloudFormation::CustomResource` | `cloudformation` | 1 + 1 in Federate mode |
+| `AWS::CloudFormation::CustomResource` | `cloudformation` | 1 + 1 with an external OIDC provider |
 
 **IAM actions required for deployment:**
 - `cognito-idp:CreateUserPool`, `cognito-idp:CreateUserPoolClient`, `cognito-idp:CreateUserPoolDomain`
-- `cognito-idp:CreateIdentityProvider` (Federate mode)
+- `cognito-idp:CreateIdentityProvider` (with an external OIDC provider, set by `ExternalOidcIssuerUrl`)
 - `iam:CreateRole`, `iam:PutRolePolicy`, `iam:PassRole`
 - `lambda:CreateFunction`, `lambda:AddPermission`
 
 **Runtime/custom-resource note:** the always-present secret-store custom
 resource reads the confidential web client's secret and creates or updates one
-Secrets Manager secret. Federate mode adds a second custom resource that reads
+Secrets Manager secret. An external OIDC provider adds a second custom resource that reads
 and updates the public client. Their roles grant only the corresponding
 `cognito-idp:DescribeUserPoolClient`/`UpdateUserPoolClient` and
 `secretsmanager:CreateSecret`/`UpdateSecret`/`DescribeSecret`/`TagResource`

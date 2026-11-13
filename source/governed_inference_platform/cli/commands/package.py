@@ -7,6 +7,7 @@ import hashlib
 import json
 import os
 import platform
+import re
 import shutil
 import subprocess
 import sys
@@ -39,7 +40,73 @@ def _is_interactive() -> bool:
 # Runtime packages bundled into the credential provider binary.
 _CREDENTIAL_PROVIDER_RUNTIME_DEPS = ["boto3", "requests", "PyJWT", "keyring", "cryptography"]
 _OTEL_HELPER_RUNTIME_DEPS: list[str] = []  # otel_helper uses only stdlib
-_PYINSTALLER_PIN = "pyinstaller==6.*"
+# Each package a build installs by name is pinned to an exact version (their own dependencies
+# resolve within the ranges they declare). Packages in source/poetry.lock take the lock version,
+# so a lock update moves the build with it; the few build-only packages not in the lock are pinned here.
+_POETRY_LOCK = Path(__file__).resolve().parents[3] / "poetry.lock"
+_BUILD_ONLY_PINS = {
+    "keyrings.alt": "keyrings.alt==5.0.2",
+    "pip": "pip==26.3",
+}
+
+
+def _normalize_dist_name(name: str) -> str:
+    return re.sub(r"[-_.]+", "-", name).lower()
+
+
+def _locked_requirements(names: list[str], lock_path: Path | None = None) -> list[str]:
+    """Return `name==version` for each package, from poetry.lock or the build-only pins.
+
+    Raises RuntimeError when a package is in neither, so no build installs an unpinned package.
+    """
+    text = (lock_path or _POETRY_LOCK).read_text(encoding="utf-8")
+    locked = {
+        _normalize_dist_name(m.group(1)): m.group(2)
+        for m in re.finditer(r'^\[\[package\]\]\nname = "([^"]+)"\nversion = "([^"]+)"', text, re.MULTILINE)
+    }
+    pins = []
+    for name in names:
+        key = _normalize_dist_name(name)
+        if key in locked:
+            pins.append(f"{name}=={locked[key]}")
+        elif name in _BUILD_ONLY_PINS:
+            pins.append(_BUILD_ONLY_PINS[name])
+        else:
+            raise RuntimeError(
+                f"{name} is neither in {lock_path or _POETRY_LOCK} nor pinned for builds; refusing an unpinned install."
+            )
+    return pins
+
+
+# The OpenTelemetry Collector Builder (OCB) that _build_otelcol downloads and runs, and the
+# SHA-256 of each release asset as published in that release's checksums.txt
+# (open-telemetry/opentelemetry-collector-releases, tag cmd/builder/v<OCB_VERSION>). A
+# download or cached file whose digest differs, or an asset with no digest here, is refused.
+# Update the version and the digests together. scripts/prepare-offline-go-bundle.sh reads both
+# from this file: keep `OCB_VERSION = "x.y.z"` on one line and each `"<asset>": "<sha256>",` on its own.
+OCB_VERSION = "0.120.0"
+_OCB_SHA256: dict[str, str] = {
+    "ocb_0.120.0_darwin_amd64": "5a6580f63219087290b43fbbff00f39584a6f0e711b0dea37fbf6e9581a0cb7b",
+    "ocb_0.120.0_darwin_arm64": "bcd373e152572e3e845ee515eec70a1b8372e1e2c7168c7e3f7e3c12c9e0ccda",
+    "ocb_0.120.0_linux_amd64": "dd715e911470f17051ce96e044b55e369e9170bc276f8b790667a8a9453f2129",
+    "ocb_0.120.0_linux_arm64": "87cc517fe98d603780bad70fe4f0e61760bdea8221486edef97057805645deed",
+    "ocb_0.120.0_windows_amd64.exe": "d56903e78009652251d63f0968fd34cffcfb1d8a0de593d0834179f2ef7cce6f",
+}
+
+
+def _verify_ocb_binary(path: Path, asset: str) -> None:
+    """Raise RuntimeError unless the file's SHA-256 equals the pinned digest for this OCB asset."""
+    expected = _OCB_SHA256.get(asset)
+    if not expected:
+        raise RuntimeError(f"No pinned SHA-256 for {asset}; refusing to run an unverified collector builder.")
+    digest = hashlib.sha256()
+    with open(path, "rb") as f:
+        for chunk in iter(lambda: f.read(1 << 20), b""):
+            digest.update(chunk)
+    actual = digest.hexdigest()
+    if actual != expected:
+        raise RuntimeError(f"SHA-256 mismatch for {asset} ({path}): expected {expected}, got {actual}.")
+
 
 # Single source of truth for Go cross-compilation targets, shared by the auth-binary
 # build (_build_go_binaries) and the collector sidecar build (_build_otelcol). Keeping
@@ -226,7 +293,14 @@ def _ensure_cross_arch_venv(arch: str, universal2_python: Path, runtime_packages
 
     pip = venv_dir / "bin" / "pip"
     install = subprocess.run(  # nosec B603 B607
-        ["/usr/bin/arch", f"-{arch}", str(pip), "install", "--quiet", _PYINSTALLER_PIN, *runtime_packages],
+        [
+            "/usr/bin/arch",
+            f"-{arch}",
+            str(pip),
+            "install",
+            "--quiet",
+            *_locked_requirements(["pyinstaller", *runtime_packages]),
+        ],
         capture_output=True,
         text=True,
     )
@@ -1415,7 +1489,6 @@ class PackageCommand(Command):
             console.print(f"[dim]Found: {result.stdout.strip()}. Install Go 1.23+ from https://go.dev/dl/[/dim]")
             return
 
-        OCB_VERSION = "0.120.0"
         if host_os == "darwin":
             ocb_os = "darwin"
         elif host_os == "windows":
@@ -1426,25 +1499,44 @@ class PackageCommand(Command):
         ocb_dir = Path.home() / ".cache" / "ocb"
         ocb_dir.mkdir(parents=True, exist_ok=True)
         ocb_suffix = ".exe" if ocb_os == "windows" else ""
-        ocb_path = ocb_dir / f"ocb_{OCB_VERSION}_{ocb_os}_{ocb_arch}{ocb_suffix}"
+        ocb_asset = f"ocb_{OCB_VERSION}_{ocb_os}_{ocb_arch}{ocb_suffix}"
+        ocb_path = ocb_dir / ocb_asset
+        if ocb_asset not in _OCB_SHA256:
+            raise RuntimeError(
+                f"No pinned SHA-256 for {ocb_asset}; refusing to download an unverified collector builder."
+            )
 
-        if not ocb_path.exists():
+        if ocb_path.exists():
+            # A cached builder is verified on every use: it may have been replaced since it was downloaded.
+            try:
+                _verify_ocb_binary(ocb_path, ocb_asset)
+            except RuntimeError as e:
+                raise RuntimeError(f"{e} Remove {ocb_path} after checking it, then re-run gip package.") from e
+        else:
             url = (
                 f"https://github.com/open-telemetry/opentelemetry-collector-releases/releases/download/"
-                f"cmd%2Fbuilder%2Fv{OCB_VERSION}/ocb_{OCB_VERSION}_{ocb_os}_{ocb_arch}{ocb_suffix}"
+                f"cmd%2Fbuilder%2Fv{OCB_VERSION}/{ocb_asset}"
             )
+            download_path = ocb_dir / f"{ocb_asset}.download"
             console.print(f"[dim]Downloading OCB v{OCB_VERSION}...[/dim]")
             try:
-                urllib.request.urlretrieve(url, ocb_path)  # noqa: S310 (trusted GitHub release URL)  # nosec B310 — pinned-version https GitHub release URL
+                urllib.request.urlretrieve(url, download_path)  # noqa: S310 (trusted GitHub release URL)  # nosec B310 — pinned-version https GitHub release URL, SHA-256 verified below
             except (urllib.error.URLError, OSError) as e:
+                download_path.unlink(missing_ok=True)
                 console.print(f"[red]Failed to download OCB: {e}[/red]")
                 console.print(
                     "[yellow]For air-gapped environments, run "
                     "'gip package --prepare-offline' on a connected machine first.[/yellow]"
                 )
                 raise
+            try:
+                _verify_ocb_binary(download_path, ocb_asset)
+            except RuntimeError:
+                download_path.unlink(missing_ok=True)
+                raise
             if ocb_os != "windows":
-                ocb_path.chmod(0o755)
+                download_path.chmod(0o755)
+            download_path.replace(ocb_path)
 
         manifest = Path(__file__).parent.parent.parent.parent / "otel_helper" / "ocb-manifest.yaml"
         if not manifest.exists():
@@ -1971,6 +2063,21 @@ class PackageCommand(Command):
             source_dir = Path(__file__).parent.parent.parent.parent
             shutil.copytree(source_dir / "credential_provider", temp_path / "credential_provider")
 
+            # Each named package is pinned: pyinstaller and six keep their existing build pins, the rest
+            # come from poetry.lock (keyrings.alt and pip are build-only pins).
+            pip_pin = _locked_requirements(["pip"])[0]
+            build_requirements = " ".join(
+                [
+                    "pyinstaller==6.3.0",
+                    *_locked_requirements(
+                        ["boto3", "requests", "PyJWT", "cryptography", "keyring", "keyrings.alt"]
+                        + ["questionary", "rich", "cleo", "pydantic", "pyyaml"]
+                    ),
+                    "six==1.16.0",
+                    *_locked_requirements(["python-dateutil"]),
+                ]
+            )
+
             # Create Dockerfile with PyInstaller
             dockerfile_content = f"""FROM --platform={docker_platform} public.ecr.aws/docker/library/ubuntu@sha256:2edbbc5dc405e9612ba3584ce95480277e3eb374407b5505fe26f17df77c7dbc
 
@@ -1988,7 +2095,7 @@ RUN apt-get update && apt-get install -y \
     && apt-get update \
     && apt-get install -y python3.12 python3.12-dev python3.12-venv \
     && python3.12 -m ensurepip \
-    && python3.12 -m pip install --upgrade pip \
+    && python3.12 -m pip install {pip_pin} \
     && rm -rf /var/lib/apt/lists/*
 
 # Set Python 3.12 as default python3
@@ -1996,20 +2103,7 @@ RUN update-alternatives --install /usr/bin/python3 python3 /usr/bin/python3.12 1
 
 # Install Python packages
 RUN python3 -m pip install --no-cache-dir \
-    pyinstaller==6.3.0 \
-    boto3 \
-    requests \
-    PyJWT \
-    cryptography \
-    keyring \
-    keyrings.alt \
-    questionary \
-    rich \
-    cleo \
-    pydantic \
-    pyyaml \
-    six==1.16.0 \
-    python-dateutil
+    {build_requirements}
 
 # Set working directory
 WORKDIR /build
@@ -2169,6 +2263,12 @@ RUN pyinstaller \
             source_dir = Path(__file__).parent.parent.parent.parent
             shutil.copytree(source_dir / "otel_helper", temp_path / "otel_helper")
 
+            # Each named package is pinned: pyinstaller keeps its existing build pin, the rest come from poetry.lock.
+            pip_pin = _locked_requirements(["pip"])[0]
+            build_requirements = " ".join(
+                ["pyinstaller==6.3.0", *_locked_requirements(["PyJWT", "cryptography", "six"])]
+            )
+
             # Create Dockerfile for OTEL helper with PyInstaller
             dockerfile_content = f"""FROM --platform={docker_platform} public.ecr.aws/docker/library/ubuntu@sha256:2edbbc5dc405e9612ba3584ce95480277e3eb374407b5505fe26f17df77c7dbc
 
@@ -2186,7 +2286,7 @@ RUN apt-get update && apt-get install -y \
     && apt-get update \
     && apt-get install -y python3.12 python3.12-dev python3.12-venv \
     && python3.12 -m ensurepip \
-    && python3.12 -m pip install --upgrade pip \
+    && python3.12 -m pip install {pip_pin} \
     && rm -rf /var/lib/apt/lists/*
 
 # Set Python 3.12 as default python3
@@ -2194,10 +2294,7 @@ RUN update-alternatives --install /usr/bin/python3 python3 /usr/bin/python3.12 1
 
 # Install Python packages
 RUN python3 -m pip install --no-cache-dir \
-    pyinstaller==6.3.0 \
-    PyJWT \
-    cryptography \
-    six
+    {build_requirements}
 
 # Set working directory
 WORKDIR /build

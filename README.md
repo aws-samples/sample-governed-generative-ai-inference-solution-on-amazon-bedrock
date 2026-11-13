@@ -173,7 +173,7 @@ Choose the credential-process architecture instead when you need IAM Identity Ce
 <details>
 <summary><strong>Areas where this platform complements Claude Apps Gateway today</strong></summary>
 
-The following capabilities are not yet available in Claude Apps Gateway but may appear on its future roadmap. This solution provides reference patterns in the meantime:
+The following capabilities are not part of Claude Apps Gateway today. This solution provides reference patterns for them:
 
 - **AWS IAM Identity Center** — native IDC authentication without external OIDC
 - **Historical usage analytics** — S3 + Athena for long-term usage queries

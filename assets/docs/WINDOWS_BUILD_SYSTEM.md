@@ -531,25 +531,22 @@ The package command provides a direct link to the AWS Console for each build.
 **Build Environment:**
 
 - Windows Server 2022
-- Python 3.12.10 (installed via Chocolatey)
+- Python 3.12.10 (Chocolatey package `python312`, pinned with `--version`)
+- MinGW (Chocolatey package `mingw`, not pinned: the latest version on the feed at build time)
 - Nuitka 2.7.12
-- pip 24.x
+- pip 26.3
 
-**Dependencies installed during build:**
+**Python packages installed during build.** Each package named in a `pip install` in
+`deployment/infrastructure/codebuild-windows.yaml` is pinned to an exact version; the packages they
+depend on are not, and resolve within the ranges those packages declare. Packages that are in
+`source/poetry.lock` use the lock version, except certifi (2026.10.23, held at a release without the
+CA-bundle advisory that affects the lock's version) and nuitka (2.7.12, this build's own pin; the
+lock's development Nuitka is newer):
 
-- nuitka==2.7.12
-- ordered-set
-- zstandard
-- boto3
-- requests
-- PyJWT
-- keyring
-- cryptography
-- questionary
-- rich
-- cleo
-- pydantic
-- pyyaml
+- nuitka, ordered-set, zstandard, certifi
+- boto3, requests, PyJWT, cryptography, charset_normalizer
+- keyring, pywin32
+- questionary, rich, cleo, pydantic, pyyaml
 
 ### Nuitka Compilation Settings
 

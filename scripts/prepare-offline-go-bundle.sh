@@ -9,7 +9,9 @@
 # pre-seeds the two artifacts that build consults before touching the network:
 #
 #   1. The OCB binary at ~/.cache/ocb/ocb_<ver>_<os>_<arch> — package.py only
-#      downloads it when that exact file is missing.
+#      downloads it when that exact file is missing. Both this script and
+#      package.py check it against the SHA-256 pinned in package.py's
+#      _OCB_SHA256 table before making it executable or running it.
 #   2. A Go module cache (GOMODCACHE) containing every module needed by both
 #      source/go (credential-process, otel-helper) and the OCB-generated
 #      collector. With GOPROXY=off, all `go` invocations — including the
@@ -27,7 +29,8 @@
 #       source <bundle-dir>/offline-env.sh
 #       poetry run gip package --go
 #
-# Requirements on both machines: bash, Go >= 1.23 (ideally the same minor version).
+# Requirements on both machines: bash, Go >= 1.23 (ideally the same minor version),
+# and sha256sum or shasum.
 
 set -euo pipefail
 
@@ -58,6 +61,37 @@ OCB_SUFFIX=""
 [ "$OCB_OS" = "windows" ] && OCB_SUFFIX=".exe"
 OCB_NAME="ocb_${OCB_VERSION}_${OCB_OS}_${OCB_ARCH}${OCB_SUFFIX}"
 
+# The builder's SHA-256 is pinned in package.py next to OCB_VERSION (one source for both).
+# No digest for this asset means no download and no run. The line is found by a fixed-string
+# match on the quoted asset name, then the 64 hex characters are taken from it; `|| true`
+# keeps an empty result (grep finds nothing) from ending the script before the message below.
+OCB_SHA256="$(grep -F "\"$OCB_NAME\":" "$PACKAGE_PY" | grep -o -E '"[0-9a-f]{64}"' | tr -d '"' || true)"
+if [ -z "$OCB_SHA256" ] || [ "$(printf '%s\n' "$OCB_SHA256" | wc -l | tr -d ' ')" != 1 ]; then
+    echo "ERROR: No pinned SHA-256 for $OCB_NAME in $PACKAGE_PY; refusing an unverified collector builder" >&2
+    exit 1
+fi
+
+sha256_of() {
+    if command -v sha256sum >/dev/null 2>&1; then
+        sha256sum "$1" | awk '{print $1}'
+    elif command -v shasum >/dev/null 2>&1; then
+        shasum -a 256 "$1" | awk '{print $1}'
+    else
+        echo "ERROR: sha256sum or shasum is required to verify $1" >&2
+        return 1
+    fi
+}
+
+# Verify an OCB file against the pinned digest; on any failure remove it and exit non-zero.
+verify_ocb_or_remove() {
+    local file="$1" actual
+    if ! actual="$(sha256_of "$file")" || [ "$actual" != "$OCB_SHA256" ]; then
+        echo "ERROR: SHA-256 mismatch for $OCB_NAME ($file): expected $OCB_SHA256, got ${actual:-none}; file removed" >&2
+        rm -f "$file"
+        exit 1
+    fi
+}
+
 write_env_file() {
     cat > "$BUNDLE_DIR/offline-env.sh" <<EOF
 # Source this before running 'gip package' on the offline machine.
@@ -74,11 +108,18 @@ prepare() {
     go version | awk '{print $3}' > "$BUNDLE_DIR/GO_VERSION"
 
     echo "==> Downloading OCB v$OCB_VERSION ($OCB_OS/$OCB_ARCH)"
-    if [ ! -f "$BUNDLE_DIR/ocb/$OCB_NAME" ]; then
-        curl -fsSL -o "$BUNDLE_DIR/ocb/$OCB_NAME" \
-            "https://github.com/open-telemetry/opentelemetry-collector-releases/releases/download/cmd%2Fbuilder%2Fv${OCB_VERSION}/${OCB_NAME}"
-        [ "$OCB_OS" != "windows" ] && chmod +x "$BUNDLE_DIR/ocb/$OCB_NAME"
+    ocb="$BUNDLE_DIR/ocb/$OCB_NAME"
+    if [ -f "$ocb" ]; then
+        verify_ocb_or_remove "$ocb"
+    else
+        # Download to a temporary name: only a verified file takes the builder's name.
+        curl -fsSL -o "$ocb.download" \
+            "https://github.com/open-telemetry/opentelemetry-collector-releases/releases/download/cmd%2Fbuilder%2Fv${OCB_VERSION}/${OCB_NAME}" \
+            || { rm -f "$ocb.download"; echo "ERROR: OCB download failed" >&2; exit 1; }
+        verify_ocb_or_remove "$ocb.download"
+        mv "$ocb.download" "$ocb"
     fi
+    [ "$OCB_OS" != "windows" ] && chmod +x "$ocb"
 
     export GOMODCACHE="$BUNDLE_DIR/gomodcache" GOTOOLCHAIN=local
 
@@ -128,7 +169,8 @@ install_bundle() {
         fi
     fi
 
-    echo "==> Installing OCB binary to ~/.cache/ocb/ (package.py skips its download when present)"
+    echo "==> Installing OCB binary to ~/.cache/ocb/ (package.py verifies it and skips its download)"
+    verify_ocb_or_remove "$BUNDLE_DIR/ocb/$OCB_NAME"
     mkdir -p "$HOME/.cache/ocb"
     cp "$BUNDLE_DIR/ocb/$OCB_NAME" "$HOME/.cache/ocb/$OCB_NAME"
     [ "$OCB_OS" != "windows" ] && chmod +x "$HOME/.cache/ocb/$OCB_NAME"

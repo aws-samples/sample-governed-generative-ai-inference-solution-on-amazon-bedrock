@@ -1,6 +1,8 @@
 import importlib.util
 import json
 import os
+import shutil
+import stat
 import subprocess
 import sys
 from pathlib import Path
@@ -16,6 +18,8 @@ SECURITY_HOOK = REPO_ROOT / "assets" / "claude-code-plugins" / "plugins" / "secu
 def run_security_hook(input_text: str, project_root: Path) -> subprocess.CompletedProcess[str]:
     env = os.environ.copy()
     env["CLAUDE_PROJECT_DIR"] = str(project_root)
+    # Keep the hook's audit log inside the test directory, never the real home.
+    env["CLAUDE_SECURITY_AUDIT_LOG"] = str(project_root / ".claude" / "security-audit.log")
     return run_cmd(  # nosec B603
         [sys.executable, str(SECURITY_HOOK)],
         input=input_text,
@@ -147,3 +151,196 @@ def test_security_hook_permission_errors_fail_closed(monkeypatch):
 
     with pytest.raises(RuntimeError, match="Unable to verify permissions"):
         security_hook.check_file_permissions("safe.py")
+
+
+COMMAND_HOOK = SECURITY_HOOK.with_name("command_security_check.sh")
+needs_bash_and_jq = pytest.mark.skipif(
+    sys.platform == "win32" or not shutil.which("bash") or not shutil.which("jq"),
+    reason="the command hook is a bash script that needs jq",
+)
+
+
+def _hook_env(home: Path, project: Path) -> dict[str, str]:
+    """An environment whose home is a test directory, with no audit-log override."""
+    env = {k: v for k, v in os.environ.items() if k != "CLAUDE_SECURITY_AUDIT_LOG"}
+    env.update({"HOME": str(home), "USERPROFILE": str(home), "CLAUDE_PROJECT_DIR": str(project)})
+    return env
+
+
+def test_security_hook_audit_log_defaults_to_home_not_project(tmp_path):
+    home, project = tmp_path / "home", tmp_path / "project"
+    home.mkdir()
+    project.mkdir()
+    work_file = project / "safe.py"
+    payload = {"tool_name": "Write", "tool_input": {"file_path": str(work_file), "content": "print('ok')\n"}}
+    result = run_cmd(  # nosec B603
+        [sys.executable, str(SECURITY_HOOK)],
+        input=json.dumps(payload),
+        text=True,
+        capture_output=True,
+        env=_hook_env(home, project),
+        check=False,
+    )
+
+    assert result.returncode == 0, result.stderr
+    log_file = home / ".claude" / "security-audit.log"
+    assert "SECURITY_CHECK Write" in log_file.read_text()
+    assert not (project / ".claude").exists(), "the audit log must not be written into the project tree"
+    if sys.platform != "win32":
+        assert stat.S_IMODE(log_file.stat().st_mode) == 0o600
+
+
+def _run_command_hook(command: str, home: Path, project: Path, extra_env: dict[str, str] | None = None):
+    env = _hook_env(home, project)
+    env.update(extra_env or {})
+    return run_cmd(  # nosec B603
+        ["bash", str(COMMAND_HOOK)],
+        input=json.dumps({"tool_input": {"command": command}}),
+        text=True,
+        capture_output=True,
+        env=env,
+        cwd=project,
+        check=False,
+    )
+
+
+@needs_bash_and_jq
+def test_command_hook_logs_flagged_commands_outside_the_project(tmp_path):
+    home, project = tmp_path / "home", tmp_path / "project"
+    home.mkdir()
+    project.mkdir()
+    flagged = 'eval "export API_TOKEN=test-token-123"'
+
+    result = _run_command_hook(flagged, home, project)
+
+    assert result.returncode == 0, result.stderr  # eval is warned about, not blocked
+    log_file = home / ".claude" / "security-audit.log"
+    assert "EVAL_USAGE" in log_file.read_text()
+    assert not (project / ".claude").exists(), "flagged commands must not be written into the project tree"
+    assert stat.S_IMODE(log_file.stat().st_mode) == 0o600
+
+
+@needs_bash_and_jq
+def test_command_hook_honours_the_audit_log_override(tmp_path):
+    home, project = tmp_path / "home", tmp_path / "project"
+    home.mkdir()
+    project.mkdir()
+    override = tmp_path / "audit" / "commands.log"
+
+    result = _run_command_hook("echo hi && eval echo hi", home, project, {"CLAUDE_SECURITY_AUDIT_LOG": str(override)})
+
+    assert result.returncode == 0, result.stderr
+    assert "EVAL_USAGE" in override.read_text()
+    assert not (home / ".claude").exists()
+    assert not (project / ".claude").exists()
+
+
+DANGEROUS = "rm -rf / --no-preserve-root"  # only a string: the hook greps it and never runs it
+needs_non_root = pytest.mark.skipif(
+    sys.platform == "win32" or os.geteuid() == 0, reason="a read-only directory does not stop root"
+)
+
+
+def _read_only_dir(path: Path) -> Path:
+    path.mkdir()
+    path.chmod(0o500)
+    return path
+
+
+@needs_bash_and_jq
+@needs_non_root
+def test_command_hook_still_blocks_when_home_is_read_only(tmp_path):
+    home, project = _read_only_dir(tmp_path / "home"), tmp_path / "project"
+    project.mkdir()
+    try:
+        result = _run_command_hook(DANGEROUS, home, project)
+    finally:
+        home.chmod(0o700)
+
+    assert result.returncode == 2, result.stderr
+    assert "Security hook audit warning" in result.stderr
+    assert not (home / ".claude").exists()
+
+
+@needs_bash_and_jq
+def test_command_hook_still_blocks_when_home_is_unset(tmp_path):
+    project = tmp_path / "project"
+    project.mkdir()
+    env = {"PATH": os.environ["PATH"], "CLAUDE_PROJECT_DIR": str(project)}  # no HOME, no log override
+    result = run_cmd(  # nosec B603
+        ["bash", str(COMMAND_HOOK)],
+        input=json.dumps({"tool_input": {"command": DANGEROUS}}),
+        text=True,
+        capture_output=True,
+        env=env,
+        cwd=project,
+        check=False,
+    )
+
+    assert result.returncode == 2, result.stderr
+    assert "Security hook audit warning" in result.stderr
+    assert not (project / ".claude").exists()
+
+
+@needs_bash_and_jq
+@needs_non_root
+def test_command_hook_still_blocks_when_the_log_override_is_unwritable(tmp_path):
+    home, project = tmp_path / "home", tmp_path / "project"
+    home.mkdir()
+    project.mkdir()
+    locked = _read_only_dir(tmp_path / "locked")
+    try:
+        result = _run_command_hook(
+            DANGEROUS, home, project, {"CLAUDE_SECURITY_AUDIT_LOG": str(locked / "sub" / "audit.log")}
+        )
+    finally:
+        locked.chmod(0o700)
+
+    assert result.returncode == 2, result.stderr
+    assert "Security hook audit warning" in result.stderr
+    assert not (home / ".claude").exists()
+
+
+# stderr as the hook finds it when its messages can't be written: closed by the caller, or
+# open but not for writing (bash 5.2 leaves the script itself open on descriptor 2 when it
+# starts with stderr closed).
+unwritable_stderr = pytest.mark.parametrize("stderr", ["2>&-", "2</dev/null"], ids=["closed", "read-only"])
+
+
+def _run_command_hook_with_stderr(command: str, stderr: str, home: Path, project: Path):
+    return run_cmd(  # nosec B603
+        ["bash", "-c", f'bash "$0" {stderr}', str(COMMAND_HOOK)],
+        input=json.dumps({"tool_input": {"command": command}}),
+        text=True,
+        capture_output=True,
+        env=_hook_env(home, project),
+        cwd=project,
+        check=False,
+    )
+
+
+@needs_bash_and_jq
+@unwritable_stderr
+def test_command_hook_still_blocks_when_stderr_cannot_be_written(tmp_path, stderr):
+    home, project = tmp_path / "home", tmp_path / "project"
+    home.mkdir()
+    project.mkdir()
+    result = _run_command_hook_with_stderr(DANGEROUS, stderr, home, project)
+
+    assert result.returncode == 2, result.stdout
+    assert "DANGEROUS_COMMAND" in (home / ".claude" / "security-audit.log").read_text()
+
+
+@needs_bash_and_jq
+@unwritable_stderr
+def test_command_hook_passes_a_safe_command_when_stderr_cannot_be_written(tmp_path, stderr):
+    home, project = tmp_path / "home", tmp_path / "project"
+    home.mkdir()
+    project.mkdir()
+    result = _run_command_hook_with_stderr("ls -la", stderr, home, project)
+
+    assert result.returncode == 0, result.stdout
+    assert result.stdout == ""
+    log_lines = (home / ".claude" / "security-audit.log").read_text().splitlines()
+    assert len(log_lines) == 1, log_lines
+    assert log_lines[0].endswith('COMMAND_SECURITY_CHECK COMMAND_CHECK "ls -la" PASSED')

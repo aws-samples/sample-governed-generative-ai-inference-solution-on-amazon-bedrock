@@ -36,14 +36,21 @@ def read_hook_input() -> Dict[str, Any]:
         sys.exit(2)
 
 
+def audit_log_path() -> Path:
+    """The audit log, in the user's home rather than the project tree (CLAUDE_SECURITY_AUDIT_LOG overrides it)."""
+    override = os.environ.get("CLAUDE_SECURITY_AUDIT_LOG")
+    return Path(override) if override else Path.home() / ".claude" / "security-audit.log"
+
+
 def write_audit_log(project_root: str, tool_name: str, file_path: str) -> None:
     """Write the audit log without weakening policy enforcement if logging fails."""
     try:
-        log_file = Path(project_root) / ".claude" / "security-audit.log"
-        log_file.parent.mkdir(exist_ok=True)
+        log_file = audit_log_path()
+        log_file.parent.mkdir(parents=True, exist_ok=True)
 
         timestamp = time.strftime("%Y-%m-%d %H:%M:%S")
-        with log_file.open("a") as f:
+        fd = os.open(log_file, os.O_WRONLY | os.O_CREAT | os.O_APPEND, 0o600)
+        with os.fdopen(fd, "a") as f:
             f.write(f"{timestamp} SECURITY_CHECK {tool_name} {file_path} PASSED\n")
     except Exception as e:
         print(f"Security hook audit warning: {e}", file=sys.stderr)
