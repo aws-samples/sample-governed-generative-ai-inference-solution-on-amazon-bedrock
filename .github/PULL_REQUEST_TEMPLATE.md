@@ -37,31 +37,32 @@ Fixes # (issue)
 
 ## Testing Checklist
 
-<!-- 
+<!--
 IMPORTANT: PRs affecting code must include testing evidence.
-Check applicable items and provide screenshots/logs.
+Tick what you tested below and paste the output under "Test Results"; the
+"Validate Testing Evidence" check (.github/workflows/pr-testing-validation.yml) reads both.
 
-Skip sections that don't apply:
-- Documentation-only PRs: No testing needed
-- CI/CD workflow changes: Usually auto-exempt (see workflow lines 50-57)
-- Dependency updates: Can be skipped with 'dependencies' label
+The check skips (steps 1 to 3 of that workflow):
+- Dependabot PRs, and PRs with the 'skip-testing-validation' or 'dependencies' label
+- PRs that change pr-testing-validation.yml or this template
+- Documentation-only PRs: tick only "Documentation update" under Type of Change
 -->
 
 ### What was tested
 
 <!-- Check what you tested and provide evidence below -->
 
-- [ ] Unit/integration tests pass (`gip test`)
-- [ ] CLI commands tested (`gip init/deploy/build/package/test`)
+- [ ] All existing tests pass locally (unit/integration, `gip test`)
+- [ ] **`gip` commands tested** (`gip init/deploy/build/package/test`)
 - [ ] CloudFormation templates deployed successfully
-- [ ] Binary installation tested (`install.sh` / `install.bat`)
-- [ ] End-to-end authentication flow tested
+- [ ] **Binary Installation** tested (`install.sh` / `install.bat`)
+- [ ] **End-to-End** authentication flow tested
 
 ### Special cases
 
-- [ ] This PR only modifies GitHub workflows (auto-exempt from testing validation)
-- [ ] This is a documentation-only change (exempt from testing validation)
-- [ ] This PR needs `skip-testing-validation` label (explain why below)
+- [ ] This PR only changes `pr-testing-validation.yml` or this template (the check skips itself)
+- [ ] This is a documentation-only change (tick only "Documentation update" above; the check skips)
+- [ ] This PR needs the `skip-testing-validation` label (explain why below)
 
 ## Testing Evidence
 
@@ -69,12 +70,17 @@ Skip sections that don't apply:
 Provide evidence that you've tested the changes:
 - Paste screenshots or terminal output
 - Link to successful GitHub Actions run
-- Or explain why testing isn't applicable (docs-only, workflow changes, etc.)
+- Or, when testing does not apply, explain why and ask a maintainer for the
+  `skip-testing-validation` label
 -->
 
-**Test Environment:** <!-- e.g., us-east-1, Python 3.12, macOS 14 -->
+### Test Environment
 
-**Test Results:**
+- **AWS Region**: <!-- e.g. us-east-1, or none -->
+- **Python Version**: <!-- e.g. 3.12 -->
+- **Operating System**: <!-- e.g. macOS 14 -->
+
+### Test Results
 
 ```text
 [Paste terminal output, screenshots, or logs here]

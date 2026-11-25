@@ -20,8 +20,8 @@ Configuration flows from the administrator profile in `~/.gip/profiles/<name>.js
 | Consumer | Examples | How it connects | Docs |
 |---|---|---|---|
 | **Internal products** | Any application that calls Bedrock through the AWS SDK | Standard AWS `credential_process` provider in the SDK default chain — temporary credentials, optionally quota-gated, with no app-side auth code | [Internal products](#internal-products-any-aws-sdk-app), [How It Works](#how-it-works) |
-| **SuperApps** | Claude Desktop (Chat, Cowork, Code); pattern extends to other enterprise AI apps | Pinned AWS Samples [Claude apps gateway](#claude-apps-gateway-recommended-for-claude-apps) (recommended) or the credential-process architecture via static MDM | [CoWork 3P Guide](assets/docs/COWORK_3P.md) |
-| **CLI coding harnesses** | Claude Code, ChatGPT Work and Codex (desktop app, CLI, IDE extension), OpenCode, Aider, Pi | Gateway (Claude apps) or the `credential_process` plug — zero harness-specific auth work | [Claude Code](#claude-code-cli), [Harnesses Guide](assets/docs/HARNESSES.md) |
+| **SuperApps** | Claude Desktop (Chat, Cowork, Code) and the ChatGPT Work desktop app; pattern extends to other enterprise AI apps | Claude Desktop: pinned AWS Samples [Claude apps gateway](#claude-apps-gateway-recommended-for-claude-apps) (recommended) or the credential-process architecture via static MDM. ChatGPT Work: the `credential_process` plug, with OpenAI models through the `amazon-bedrock-runtime` provider and `AllowOpenAIModels=true` (desktop app not live-tested) | [CoWork 3P Guide](assets/docs/COWORK_3P.md), [ChatGPT Work and Codex](assets/docs/HARNESSES.md#chatgpt-work-and-codex-desktop-app-cli-ide-extension) |
+| **CLI coding harnesses** | Claude Code, ChatGPT Work and Codex (CLI, IDE extension), OpenCode, Aider, Pi | Gateway (Claude apps) or the `credential_process` plug — zero harness-specific auth work | [Claude Code](#claude-code-cli), [Harnesses Guide](assets/docs/HARNESSES.md) |
 
 The sample is consumer-agnostic: each supported surface your organization connects uses the same deployed controls.
 

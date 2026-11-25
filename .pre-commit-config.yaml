@@ -1,4 +1,5 @@
 # Pre-commit hooks for CloudFormation and YAML validation
+# Install pre-commit as a tool, outside Poetry: `pipx install pre-commit` or `uv tool install pre-commit`
 # Run `pre-commit install` to set up the git hook scripts
 # See https://pre-commit.com for more information
 
@@ -36,7 +37,7 @@ repos:
 
   # Python code quality - Ruff (fast linter and formatter)
   - repo: https://github.com/astral-sh/ruff-pre-commit
-    rev: v0.16.9  # keep equal to source/poetry.lock and lint.yml
+    rev: v0.17.6  # keep equal to source/poetry.lock and lint.yml
     hooks:
       - id: ruff
         name: Lint Python with Ruff (auto-fix)

@@ -539,9 +539,8 @@ The package command provides a direct link to the AWS Console for each build.
 **Python packages installed during build.** Each package named in a `pip install` in
 `deployment/infrastructure/codebuild-windows.yaml` is pinned to an exact version; the packages they
 depend on are not, and resolve within the ranges those packages declare. Packages that are in
-`source/poetry.lock` use the lock version, except certifi (2026.10.23, held at a release without the
-CA-bundle advisory that affects the lock's version) and nuitka (2.7.12, this build's own pin; the
-lock's development Nuitka is newer):
+`source/poetry.lock` use the lock version, except nuitka (2.7.12, this build's own pin; the lock's
+development Nuitka is newer):
 
 - nuitka, ordered-set, zstandard, certifi
 - boto3, requests, PyJWT, cryptography, charset_normalizer

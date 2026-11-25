@@ -79,8 +79,8 @@ caller's assumed-role ARN, `inputTokenCount`, `cacheReadInputTokenCount`,
   permission set with its own narrower policy needs the same statements
   (`providers/iam-identity-center-setup.md`, not live-tested with IdC). The
   same holds for `DenyBedrockMantleEndpoint`: for IdC users Mantle is denied
-  by what the permission set (and any SCP) allows or denies, so the guide adds
-  the explicit deny to the permission set.
+  by what the permission set (and any SCP) allows or denies, and the stack's
+  Bedrock access policy carries the explicit deny.
 - ChatGPT-Work-only users with more than 1M tokens/month raise one
   `metering_drift` alert per month (client telemetry is structurally zero).
 - The sandbox run also found and fixed a pre-existing metering bug: accrual had

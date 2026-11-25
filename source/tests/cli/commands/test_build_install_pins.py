@@ -105,7 +105,6 @@ def test_macos_cross_arch_venv_pins_every_install(monkeypatch, tmp_path):
 
 # Buildspec pins that deliberately differ from source/poetry.lock: name -> (pinned version, reason).
 BUILDSPEC_LOCK_EXCEPTIONS = {
-    "certifi": ("2026.10.23", "held at a release without the CA-bundle advisory that affects the lock's version"),
     "nuitka": ("2.7.12", "the Windows build's Nuitka; the lock's dev-group Nuitka is newer"),
     "pyinstaller": ("6.3.0", "the Linux builds' PyInstaller, kept from before the lock was used"),
 }
