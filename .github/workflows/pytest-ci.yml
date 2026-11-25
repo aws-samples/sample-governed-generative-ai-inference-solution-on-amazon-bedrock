@@ -199,7 +199,7 @@ jobs:
           python-version: '3.12'
 
       - name: Install cfn-lint
-        run: pip install cfn-lint==1.57.0  # keep equal to source/poetry.lock
+        run: pip install cfn-lint==1.60.1  # keep equal to source/poetry.lock
 
       - name: Lint CloudFormation templates
         run: |

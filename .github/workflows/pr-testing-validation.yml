@@ -28,8 +28,15 @@ jobs:
             console.log('PR Body Length:', prBody.length);
 
             // ──────────────────────────────────────────────────────────
-            // 1. Skip validation if PR has bypass label
+            // 1. Skip validation for Dependabot and for PRs with a bypass label
             // ──────────────────────────────────────────────────────────
+            // Dependabot adds its labels after the `opened` event, so the label
+            // check below cannot skip that first run; match its login instead.
+            if (prAuthor === 'dependabot[bot]') {
+              console.log('✅ Dependabot pull request — bypassing testing validation');
+              return;
+            }
+
             const labels = context.payload.pull_request.labels.map(l => l.name);
             console.log('PR Labels:', labels);
 

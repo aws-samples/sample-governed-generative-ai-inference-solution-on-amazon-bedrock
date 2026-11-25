@@ -13,6 +13,22 @@ Changes on this fork relative to upstream `beta`.
 
 ### Changed
 
+- Dependency updates in `source/poetry.lock`, written with Poetry 2.4.3.
+  Runtime: `boto3` and `botocore` 1.44.11, `certifi` 2026.11.20
+  (GHSA-6q48-6c7w-9gw2), `cryptography` 50.0.2, `pydantic` 2.14.4, `PyJWT`
+  2.15.1 and `urllib3` 2.8.0 (GHSA-8988-9cw3-xx77, GHSA-vxq7-64xx-v4gw,
+  GHSA-gh4c-6fx4-qh6g). Development: `black` 26.10.1, `cfn-lint` 1.60.1, `mypy`
+  2.4.1, `nuitka` 4.3.5, `pytest` 9.2.0, `ruff` 0.17.6 (the constraint now
+  allows `<0.18`), `setuptools` 84.2.1, `tenacity` 9.2.1, `types-requests`
+  2.33.0.20261030 and `virtualenv` 21.15.13, with the packages they require.
+  `filelock`, which `virtualenv` needs, moves to 4.1.0, the newest release that
+  supports Python 3.10. The pinned installs in `codebuild-windows.yaml`, the
+  `ruff` and `cfn-lint` pins in the workflows and the pre-commit `ruff`
+  revision follow the lock; the Windows build's `certifi` pin now follows it
+  too. Supported Python versions are unchanged (3.10 to 3.13).
+- The README client table lists the ChatGPT Work desktop app next to Claude
+  Desktop under SuperApps; Codex CLI and the IDE extension stay under CLI coding
+  harnesses.
 - **`gip deploy` refuses server-side metering in `max` mode when it cannot
   attribute usage to a user.** The metering processor names a user only for IAM
   Identity Center sessions and for Direct STS sessions bound to the `email`
