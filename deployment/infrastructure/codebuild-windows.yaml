@@ -279,7 +279,7 @@ Resources:
                 - echo Installing application dependencies...
                 - C:\Python312\python.exe -m pip install boto3==1.44.11 requests==2.34.2 PyJWT==2.15.1 cryptography==50.0.2 charset_normalizer==3.4.2
                 - C:\Python312\python.exe -m pip install keyring==25.7.0 pywin32==312
-                - C:\Python312\python.exe -m pip install questionary==2.1.1 rich==15.0.0 cleo==2.1.0 pydantic==2.14.4 pyyaml==6.0.3
+                - C:\Python312\python.exe -m pip install questionary==2.1.1 rich==15.0.0 cleo==2.1.0 pydantic==2.14.4 pyyaml==6.0.4
 
             build:
               commands:
