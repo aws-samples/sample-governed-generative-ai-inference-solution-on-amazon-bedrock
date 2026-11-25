@@ -21,8 +21,9 @@ Changes on this fork relative to upstream `beta`.
   2.4.1, `nuitka` 4.3.5, `pytest` 9.2.0, `ruff` 0.17.6 (the constraint now
   allows `<0.18`), `setuptools` 84.2.1, `tenacity` 9.2.1, `types-requests`
   2.33.0.20261030 and `virtualenv` 21.15.13, with the packages they require.
-  `filelock`, which `virtualenv` needs, moves to 4.1.0, the newest release that
-  supports Python 3.10. The pinned installs in `codebuild-windows.yaml`, the
+  `filelock`, which `virtualenv` needs, moves to 3.29.7 and is held below 3.30
+  in the dev group: its fixed releases need Python 3.11, and 3.30 to 4.1 carry
+  more published advisories. The pinned installs in `codebuild-windows.yaml`, the
   `ruff` and `cfn-lint` pins in the workflows and the pre-commit `ruff`
   revision follow the lock; the Windows build's `certifi` pin now follows it
   too. Supported Python versions are unchanged (3.10 to 3.13).
