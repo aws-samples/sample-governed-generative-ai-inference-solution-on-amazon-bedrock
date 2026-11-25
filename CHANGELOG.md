@@ -27,6 +27,9 @@ Changes on this fork relative to upstream `beta`.
   `ruff` and `cfn-lint` pins in the workflows and the pre-commit `ruff`
   revision follow the lock; the Windows build's `certifi` pin now follows it
   too. Supported Python versions are unchanged (3.10 to 3.13).
+- `PyYAML` 6.0.4 in `source/poetry.lock`, with the pinned installs in
+  `codebuild-windows.yaml` and `sync-claude-apps-gateway.yml` at the same
+  version. It requires Python 3.10 or later, within the supported range.
 - The README client table lists the ChatGPT Work desktop app next to Claude
   Desktop under SuperApps; Codex CLI and the IDE extension stay under CLI coding
   harnesses.
