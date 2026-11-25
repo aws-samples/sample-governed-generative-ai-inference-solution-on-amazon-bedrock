@@ -1,4 +1,5 @@
 # Pre-commit hooks for CloudFormation and YAML validation
+# Install pre-commit as a tool, outside Poetry: `pipx install pre-commit` or `uv tool install pre-commit`
 # Run `pre-commit install` to set up the git hook scripts
 # See https://pre-commit.com for more information
 

@@ -132,7 +132,7 @@ Deployment prerequisites:
 
 | Setting | Why |
 |---|---|
-| `aws.allow_openai_models: true` (auth parameter `AllowOpenAIModels=true`) | Admits OpenAI models on bedrock-runtime ([ADR-0037](adr/0037-openai-models-on-bedrock-runtime.md)). Default `false` keeps the Anthropic-only policy. With IAM Identity Center the permission set decides instead ([IdC guide](providers/iam-identity-center-setup.md#chatgpt-work-and-codex-openai-models)). |
+| `aws.allow_openai_models: true` (auth parameter `AllowOpenAIModels=true`) | Admits OpenAI models on bedrock-runtime ([ADR-0037](adr/0037-openai-models-on-bedrock-runtime.md)). Default `false` keeps the Anthropic-only policy. With IAM Identity Center it applies once the permission set references the auth stack's Bedrock access policy ([IdC guide](providers/iam-identity-center-setup.md#chatgpt-work-and-codex-openai-models); not live-tested). |
 | `metering.enabled: true`, `metering.mode: max` | Codex emits no Claude Code OTEL metrics, so only server-side metering counts its usage. With `shadow`, a ChatGPT-Work-only user is never blocked (verified live). With Direct STS, `max` also needs `session_name_binding: email`, so that metering can attribute the usage; `gip deploy` refuses `max` without it. |
 | `enable_finegrained_quotas: true` (for per-user or per-group budgets) | Otherwise one default limit applies to every user. |
 
@@ -160,8 +160,8 @@ Notes:
 - **Use only the `amazon-bedrock-runtime` provider.** `amazon-bedrock` selects
   Mantle, which the governed role policy denies in every configuration because Mantle
   writes no invocation logs ([ADR-0022](adr/0022-mantle-metering-deferred-tripwire.md)).
-  IAM Identity Center users run on the permission set instead, so add the deny there
-  ([IdC guide](providers/iam-identity-center-setup.md#chatgpt-work-and-codex-openai-models)).
+  IAM Identity Center users get the deny once their permission set references the
+  auth stack's Bedrock access policy ([IdC guide](providers/iam-identity-center-setup.md#chatgpt-work-and-codex-openai-models)).
 - **OpenAI models only.** ChatGPT Work and Codex do not run Claude models on
   Bedrock; the Claude CRIS IDs do not apply.
 - **Data residency.** The model cards of the GPT-5.x and GPT-6.x models that

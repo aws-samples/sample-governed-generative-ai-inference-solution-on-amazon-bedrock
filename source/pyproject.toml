@@ -58,11 +58,6 @@ pyinstaller = "^6.19.0"
 ruff = ">=0.15.10,<0.18.0"
 mypy = ">=1.20,<3.0"
 types-requests = "*"
-pre-commit = "^4.5.1"
-# filelock comes in through pre-commit and virtualenv. Its fixed releases (4.2.1 and
-# later) need Python 3.11, and releases 3.30 to 4.1 carry more published advisories
-# than 3.29. Drop this line when Python 3.10 support ends.
-filelock = "<3.30"
 cfn-lint = "^1.48.1"
 yamllint = "^1.38.0"
 tenacity = "^9.1.4"  # live E2E harness (tests/e2e/conftest.py)

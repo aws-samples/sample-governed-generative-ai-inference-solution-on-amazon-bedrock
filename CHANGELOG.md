@@ -20,16 +20,22 @@ Changes on this fork relative to upstream `beta`.
   GHSA-gh4c-6fx4-qh6g). Development: `black` 26.10.1, `cfn-lint` 1.60.1, `mypy`
   2.4.1, `nuitka` 4.3.5, `pytest` 9.2.0, `ruff` 0.17.6 (the constraint now
   allows `<0.18`), `setuptools` 84.2.1, `tenacity` 9.2.1, `types-requests`
-  2.33.0.20261030 and `virtualenv` 21.15.13, with the packages they require.
-  `filelock`, which `virtualenv` needs, moves to 3.29.7 and is held below 3.30
-  in the dev group: its fixed releases need Python 3.11, and 3.30 to 4.1 carry
-  more published advisories. The pinned installs in `codebuild-windows.yaml`, the
+  2.33.0.20261030, with the packages they require. `pre-commit` leaves the
+  Poetry dev group, and with it `virtualenv`, `filelock` and their requirements:
+  install it as a tool (`pipx install pre-commit` or `uv tool install
+  pre-commit`). The pinned installs in `codebuild-windows.yaml`, the
   `ruff` and `cfn-lint` pins in the workflows and the pre-commit `ruff`
   revision follow the lock; the Windows build's `certifi` pin now follows it
   too. Supported Python versions are unchanged (3.10 to 3.13).
 - The README client table lists the ChatGPT Work desktop app next to Claude
   Desktop under SuperApps; Codex CLI and the IDE extension stay under CLI coding
   harnesses.
+- The pull request template uses the wording and headings that the testing-
+  evidence check reads, so a body filled in from it passes, and it says which
+  pull requests the check skips. The check itself is unchanged.
+- `HARNESSES.md`, `ARCHITECTURE.md` and ADR-0037 now say that IAM Identity
+  Center users get the OpenAI statements and the Mantle deny once the permission
+  set references the auth stack's Bedrock access policy.
 - **`gip deploy` refuses server-side metering in `max` mode when it cannot
   attribute usage to a user.** The metering processor names a user only for IAM
   Identity Center sessions and for Direct STS sessions bound to the `email`
